@@ -1,0 +1,292 @@
+/* =============================================================================
+   Classroom Access Detection System - สไตล์หลัก
+   เขียน CSS ธรรมดา ไม่มี framework และไม่มี build step ตามที่กำหนดไว้
+   ============================================================================= */
+
+:root {
+  /* ---- จานสี ---- */
+  --bg: #0f1420;
+  --bg-card: #1a2130;
+  --bg-hover: #222b3d;
+  --border: #2c3648;
+
+  --text: #e8ecf4;
+  --text-dim: #93a0b8;
+
+  --accent: #4c8dff;
+  --ok: #3ecf8e;
+  --warn: #ffb020;
+  --error: #ff5c5c;
+
+  --radius: 10px;
+  --gap: 16px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  /* เรียงฟอนต์ไทยไว้ด้วย เพราะชื่อ-นามสกุลในระบบเป็นภาษาไทย */
+  font-family: "Sarabun", "Noto Sans Thai", "Segoe UI", system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+}
+
+/* ---------------------------------------------------------------------------
+   แถบหัวเรื่องด้านบน
+   --------------------------------------------------------------------------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  padding: 18px 24px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.topbar__subtitle {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.topbar__phase {
+  padding: 5px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+   เลย์เอาต์หลัก
+   --------------------------------------------------------------------------- */
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.card__header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------------------
+   ปุ่ม / ป้าย
+   --------------------------------------------------------------------------- */
+.btn {
+  padding: 7px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: #27324a;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.badge {
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* ---------------------------------------------------------------------------
+   สถานะการเชื่อมต่อ (จุดกลม + ข้อความ)
+   --------------------------------------------------------------------------- */
+.status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+}
+
+.status__dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status__dot--pending {
+  background: var(--warn);
+  /* กะพริบระหว่างรอผล เพื่อสื่อว่าระบบกำลังทำงานอยู่ ไม่ได้ค้าง */
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.status__dot--ok    { background: var(--ok); }
+.status__dot--error { background: var(--error); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
+
+/* ---------------------------------------------------------------------------
+   รายละเอียดเชิงเทคนิค
+   --------------------------------------------------------------------------- */
+.detail {
+  margin: 16px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 14px;
+}
+
+.detail__row {
+  display: flex;
+  gap: 12px;
+}
+
+.detail dt {
+  min-width: 150px;
+  color: var(--text-dim);
+}
+
+.detail dd {
+  margin: 0;
+  /* ค่าทางเทคนิคใช้ฟอนต์ monospace อ่านง่ายกว่า */
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+/* ---------------------------------------------------------------------------
+   กล่องแจ้งเตือน
+   --------------------------------------------------------------------------- */
+.alert {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.alert--error {
+  background: rgba(255, 92, 92, 0.1);
+  border: 1px solid rgba(255, 92, 92, 0.35);
+  color: #ffb3b3;
+}
+
+/* ---------------------------------------------------------------------------
+   ตารางรายชื่อ
+   --------------------------------------------------------------------------- */
+.table-wrap {
+  /* จอแคบให้เลื่อนตารางแนวนอนได้ ไม่ดันหน้าเว็บให้ล้น */
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.table th,
+.table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.table th {
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+.table__empty {
+  text-align: center !important;
+  color: var(--text-dim);
+  padding: 28px !important;
+  white-space: normal !important;
+}
+
+/* จุดบอกว่ามี path รูปครบ 3 มุมหรือไม่ */
+.photo-dots {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.photo-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.photo-dot--set {
+  background: var(--ok);
+}
+
+/* ---------------------------------------------------------------------------
+   ท้ายหน้า
+   --------------------------------------------------------------------------- */
+.footer {
+  display: flex;
+  justify-content: space-between;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 18px 16px 32px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* ---------------------------------------------------------------------------
+   จอเล็ก
+   --------------------------------------------------------------------------- */
+@media (max-width: 600px) {
+  .detail__row { flex-direction: column; gap: 2px; }
+  .detail dt   { min-width: auto; }
+}

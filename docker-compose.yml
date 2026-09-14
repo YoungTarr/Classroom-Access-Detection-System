@@ -1,0 +1,121 @@
+# =============================================================================
+# Classroom Access Detection System
+# ระบบตรวจจับคนเข้าใช้ห้องของหลักสูตรวิศวกรรมคอมพิวเตอร์
+#
+# 4 service:  db (PostgreSQL) / adminer (ดู DB ผ่านเว็บ) / backend (FastAPI) / frontend (nginx)
+#
+# ค่าทั้งหมดอ่านจากไฟล์ .env  ถ้ายังไม่มีให้คัดลอกจาก .env.example ก่อน
+# syntax ${VAR:?ข้อความ} = ถ้าไม่มีตัวแปรนี้ ให้หยุดทันทีพร้อมบอกสาเหตุ
+# (กันปัญหา container ขึ้นมาแล้วพังทีหลังโดยไม่รู้สาเหตุ)
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # ฐานข้อมูล PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: cads-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:?ไม่พบตัวแปร DB_USER - กรุณาสร้างไฟล์ .env โดยคัดลอกจาก .env.example}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?ไม่พบตัวแปร DB_PASSWORD - กรุณาสร้างไฟล์ .env โดยคัดลอกจาก .env.example}
+      POSTGRES_DB: ${DB_NAME:?ไม่พบตัวแปร DB_NAME - กรุณาสร้างไฟล์ .env โดยคัดลอกจาก .env.example}
+      TZ: ${TZ:-Asia/Bangkok}
+      # PGTZ ทำให้ session ของ psql/แอปใช้โซนเวลาไทยด้วย ไม่ใช่แค่ตัว OS ของ container
+      PGTZ: ${TZ:-Asia/Bangkok}
+    ports:
+      # ซ้ายคือพอร์ตบนเครื่อง host (เอาไว้ต่อจาก DBeaver/psql) ขวาคือพอร์ตภายใน container
+      # ภายใน docker network ต้องเป็น 5432 เสมอ ไม่เกี่ยวกับพอร์ตที่ map ออกมา
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      # ข้อมูลจริงของฐานข้อมูล เก็บใน named volume จะได้ไม่หายตอนลบ container
+      - pgdata:/var/lib/postgresql/data
+      # สคริปต์ใน /docker-entrypoint-initdb.d/ จะรันเรียงตามชื่อไฟล์
+      # และรัน "ครั้งแรกครั้งเดียว" ตอนที่ volume ยังว่างเท่านั้น
+      # ถ้าแก้ schema แล้วอยากให้รันใหม่ ต้อง: docker compose down -v
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      # ใช้ $$ เพื่อ escape ไม่ให้ docker compose มาแทนค่าตัวแปรตอน parse ไฟล์นี้
+      # ผลคือคำสั่งที่รันใน container จะเห็นเป็น $POSTGRES_USER ของ container เอง
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Adminer - หน้าเว็บสำหรับดู/แก้ฐานข้อมูล (http://localhost:8080)
+  # เข้าใช้: System=PostgreSQL, Server=db, Username/Password/Database ตาม .env
+  # ---------------------------------------------------------------------------
+  adminer:
+    image: adminer:latest
+    container_name: cads-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # เติมช่อง Server ให้อัตโนมัติเป็นชื่อ service ของฐานข้อมูล
+      ADMINER_DEFAULT_SERVER: db
+      TZ: ${TZ:-Asia/Bangkok}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Backend - FastAPI (http://localhost:8000)
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+    container_name: cads-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # ---- override ค่าจาก .env สำหรับการต่อภายใน docker network ----
+      # กับดักคลาสสิก: .env มี DB_HOST=localhost ซึ่งถูกสำหรับเครื่อง host
+      # แต่ผิดสำหรับ container เพราะ localhost ของ backend = ตัว backend เอง
+      # ต้องใช้ชื่อ service "db" และพอร์ตภายใน 5432 เสมอ
+      # (ค่าใน environment: ชนะค่าจาก env_file: เสมอ จึง override ได้ปลอดภัย)
+      DB_HOST: db
+      DB_PORT: "5432"
+      FACES_DIR: /data/faces
+      PYTHONPATH: /app
+    ports:
+      - "8000:8000"
+    volumes:
+      # mount โค้ดจากเครื่อง host เข้ามา แก้โค้ดแล้ว uvicorn --reload จะรีโหลดเอง ไม่ต้อง rebuild
+      - ./backend/app:/app/app
+      # รูปใบหน้าของสมาชิก mount แบบอ่านอย่างเดียว กัน backend เขียนทับข้อมูลจริง
+      - ./data/faces:/data/faces:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ---------------------------------------------------------------------------
+  # Frontend - nginx เสิร์ฟไฟล์ static + reverse proxy ไป backend (http://localhost:3000)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+    container_name: cads-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    volumes:
+      # mount ไฟล์ static จาก host เช่นกัน แก้ HTML/CSS/JS แล้วกด refresh เห็นผลทันที
+      - ./frontend/index.html:/usr/share/nginx/html/index.html:ro
+      - ./frontend/css:/usr/share/nginx/html/css:ro
+      - ./frontend/js:/usr/share/nginx/html/js:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    environment:
+      TZ: ${TZ:-Asia/Bangkok}
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+    name: cads-pgdata

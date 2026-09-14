@@ -1,0 +1,21 @@
+# =============================================================================
+# Python dependencies - Classroom Access Detection System (backend)
+#
+# ทุกตัวในไฟล์นี้ต้องมี wheel สำหรับ linux/arm64 (aarch64)
+# เพราะปลายทางคือ Raspberry Pi 5 / Ubuntu 24.04 ARM64
+# ถ้าตัวไหนไม่มี wheel จะต้อง build จาก source บน Pi ซึ่งช้ามากหรือพังไปเลย
+# =============================================================================
+
+# --- เว็บเฟรมเวิร์ก ---
+fastapi==0.115.6
+# uvicorn[standard] ดึง uvloop / httptools / watchfiles / websockets มาด้วย
+# (ทุกตัวมี wheel aarch64 ครบ) websockets จะได้ใช้จริงตั้งแต่เฟส 2
+uvicorn[standard]==0.34.0
+
+# --- ตัวเชื่อมต่อ PostgreSQL ---
+# psycopg 3 แบบ binary = มี libpq ฝังมาในตัว ไม่ต้องลง libpq-dev ใน image
+# ส่วน pool ใช้ทำ connection pool จะได้ไม่ต้องเปิด connection ใหม่ทุก request
+psycopg[binary,pool]==3.2.3
+
+# --- อ่านไฟล์ .env ตอนรัน backend นอก Docker (ใน Docker ใช้ env_file อยู่แล้ว) ---
+python-dotenv==1.0.1

@@ -1,0 +1,31 @@
+# ---------- ความลับ / ค่าเฉพาะเครื่อง ----------
+.env
+.env.local
+.env.*.local
+
+# ---------- รูปใบหน้าจริงของสมาชิก (ข้อมูลส่วนบุคคล ห้ามขึ้น git) ----------
+data/faces/*
+!data/faces/.gitkeep
+
+# ---------- โมเดล AI (ไฟล์ใหญ่ ให้ดาวน์โหลด/cache เอง) ----------
+models/
+*.onnx
+
+# ---------- ไฟล์ index ของ FAISS (สร้างใหม่ได้เสมอ) ----------
+*.faiss
+*.index
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ---------- ระบบปฏิบัติการ / เครื่องมือ ----------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

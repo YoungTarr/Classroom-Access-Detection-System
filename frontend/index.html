@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ระบบตรวจจับคนเข้าใช้ห้อง - วิศวกรรมคอมพิวเตอร์</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="topbar__title">
+      <h1>ระบบตรวจจับคนเข้าใช้ห้อง</h1>
+      <p class="topbar__subtitle">หลักสูตรวิศวกรรมคอมพิวเตอร์</p>
+    </div>
+    <!-- ป้ายบอกเฟสปัจจุบัน อัปเดตจากค่า app.phase ที่ /api/health ส่งมา -->
+    <div class="topbar__phase" id="phase-badge">เฟส —</div>
+  </header>
+
+  <main class="container">
+
+    <!-- ===================================================================
+         การ์ดสถานะการเชื่อมต่อ
+         =================================================================== -->
+    <section class="card">
+      <div class="card__header">
+        <h2>สถานะการเชื่อมต่อ</h2>
+        <button type="button" class="btn" id="btn-refresh">ตรวจสอบใหม่</button>
+      </div>
+
+      <div class="status" id="status-box">
+        <span class="status__dot status__dot--pending" id="status-dot"></span>
+        <span class="status__text" id="status-text">กำลังตรวจสอบ…</span>
+      </div>
+
+      <!-- รายละเอียดเชิงเทคนิค แสดงเมื่อได้ข้อมูลจาก /api/health แล้ว -->
+      <dl class="detail" id="health-detail" hidden>
+        <div class="detail__row">
+          <dt>ฐานข้อมูล</dt>
+          <dd id="health-db-version">—</dd>
+        </div>
+        <div class="detail__row">
+          <dt>ปลายทาง</dt>
+          <dd id="health-db-target">—</dd>
+        </div>
+        <div class="detail__row">
+          <dt>จำนวนสมาชิก</dt>
+          <dd id="health-db-count">—</dd>
+        </div>
+        <div class="detail__row">
+          <dt>เวลาของเซิร์ฟเวอร์</dt>
+          <dd id="health-server-time">—</dd>
+        </div>
+      </dl>
+
+      <!-- กล่องแสดงสาเหตุเมื่อเชื่อมต่อไม่สำเร็จ - ต้องบอกสาเหตุเสมอ ไม่ปล่อยเงียบ -->
+      <div class="alert alert--error" id="health-error" hidden></div>
+    </section>
+
+    <!-- ===================================================================
+         การ์ดรายชื่อสมาชิก
+         =================================================================== -->
+    <section class="card">
+      <div class="card__header">
+        <h2>รายชื่อสมาชิก</h2>
+        <span class="badge" id="member-count">—</span>
+      </div>
+
+      <div class="table-wrap">
+        <table class="table" id="member-table">
+          <thead>
+            <tr>
+              <th>รหัสนักศึกษา</th>
+              <th>ชื่อ</th>
+              <th>นามสกุล</th>
+              <th>รูปใบหน้า</th>
+            </tr>
+          </thead>
+          <tbody id="member-tbody">
+            <tr>
+              <td colspan="4" class="table__empty">กำลังโหลดข้อมูล…</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <span>Classroom Access Detection System</span>
+    <span id="footer-version">—</span>
+  </footer>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
