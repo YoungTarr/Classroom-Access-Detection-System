@@ -31,11 +31,19 @@ const AUTO_REFRESH_MS = 15000;
 const CONFIG_FALLBACK = {
   stream: { target_width: 640, send_fps: 10, jpeg_quality: 0.7, mirror: true },
   face: { det_thresh: 0.5, model_pack: '—' },
+  tracking: { smoothing: 0.35, max_missing: 3 },
 };
 
 // สีที่ใช้วาดกรอบ (เฟส 4 จะเพิ่มสีเขียว/แดงตามผลการจดจำ)
 const BOX_COLOR = '#4c8dff';
 const BOX_LINE_WIDTH = 3;
+
+// จำนวนเฟรมที่ต้องเจอติดกันก่อนจะเริ่มวาดกรอบ
+// กันสัญญาณรบกวนที่ตัวตรวจจับเจอแวบเดียวแล้วหายไป ไม่ให้กรอบผุดขึ้นมาแวบหนึ่ง
+const MIN_HITS_TO_DRAW = 2;
+
+// ความจางของกรอบที่กำลัง "ค้างไว้" เพราะหาใบหน้าไม่เจอชั่วคราว
+const FADED_ALPHA = 0.35;
 
 // ---------------------------------------------------------------------------
 // ตัวช่วยอ้างอิง element
@@ -61,6 +69,8 @@ const el = {
   statFps: byId('stat-fps'),
   statProcess: byId('stat-process'),
   statFaces: byId('stat-faces'),
+  statTracks: byId('stat-tracks'),
+  statRenderFps: byId('stat-render-fps'),
   statDropped: byId('stat-dropped'),
 
   // สถานะระบบ
@@ -100,13 +110,32 @@ const detection = {
   watchdogTimer: null,   // กันค้างถ้า backend ไม่ตอบกลับมาเลย
 
   // ผลล่าสุดที่ได้จาก backend
-  lastFaces: [],
   lastSourceSize: null,  // ขนาดของภาพที่ส่งไปตรวจ [w, h]
 
   // สถิติ
   sentTimestamps: [],    // เวลาที่ส่งแต่ละเฟรม ใช้คำนวณ fps จริง
   droppedFrames: 0,
   lastProcessMs: null,
+};
+
+/* ---------------------------------------------------------------------------
+   สถานะการวาดกรอบ (เฟส 3)
+
+   แยกออกจาก detection โดยตั้งใจ เพราะสองอย่างนี้เดินคนละจังหวะกัน:
+     - detection เดินตามผลจาก backend  (~8-10 ครั้ง/วินาที)
+     - การวาดเดินตามจังหวะรีเฟรชของจอ (~60 ครั้ง/วินาที)
+
+   กรอบแต่ละอันจึงมีทั้ง "ตำแหน่งเป้าหมาย" (ผลล่าสุดจาก backend)
+   และ "ตำแหน่งที่วาดอยู่จริง" ซึ่งค่อย ๆ ไหลเข้าหาเป้าหมายทุกเฟรมของจอ
+   --------------------------------------------------------------------------- */
+const render = {
+  // Map: track_id -> { current, target, score, hits, visible, missing, alpha, targetAlpha, dead }
+  boxes: new Map(),
+  rafId: null,
+  lastTickAt: 0,
+
+  // นับอัตราการวาดจริง เพื่อยืนยันว่าวาดทุกเฟรมของจอจริง ไม่ใช่วาดเฉพาะตอนได้ผลใหม่
+  tickTimestamps: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -226,6 +255,7 @@ async function startCamera() {
     el.video.classList.toggle('is-mirrored', Boolean(config.stream.mirror));
 
     syncOverlaySize();
+    startRenderLoop();
     startDetection();
 
   } catch (err) {
@@ -239,18 +269,20 @@ async function startCamera() {
 /** ปิดกล้อง + หยุดส่งเฟรม */
 function stopCamera() {
   stopDetection();
+  stopRenderLoop();
   camera.stop();
 
   el.videoIdle.hidden = false;
   el.btnCamera.textContent = 'เปิดกล้อง';
   el.btnCamera.classList.add('btn--primary');
 
-  clearOverlay();
   setText(el.statResolution, null);
   setText(el.statSentSize, null);
   setText(el.statFps, null);
   setText(el.statProcess, null);
   setText(el.statFaces, null);
+  setText(el.statTracks, null);
+  setText(el.statRenderFps, null);
   setText(el.statDropped, null);
 }
 
@@ -318,15 +350,24 @@ function startDetection() {
     }
 
     onResultSettled();
-    detection.lastFaces = data.faces || [];
     detection.lastSourceSize = data.source_size || null;
     detection.lastProcessMs = data.process_ms;
 
-    setText(el.statProcess, data.process_ms !== undefined ? data.process_ms + ' ms' : null);
-    setText(el.statFaces, detection.lastFaces.length + ' คน');
+    const tracks = data.tracks || [];
+    const visibleCount = tracks.filter((t) => t.visible).length;
+
+    // แสดงเวลาแยกเป็น ตรวจจับ / ติดตาม จะได้รู้ว่าเวลาหมดไปกับขั้นไหน
+    const timing = (data.detect_ms !== undefined)
+      ? (data.process_ms + ' ms (ตรวจ ' + data.detect_ms + ' + ติดตาม ' + data.track_ms + ')')
+      : (data.process_ms + ' ms');
+    setText(el.statProcess, data.process_ms !== undefined ? timing : null);
+
+    setText(el.statFaces, (data.detected_count !== undefined ? data.detected_count : visibleCount) + ' คน');
+    setText(el.statTracks, tracks.length + ' track');
     setText(el.statSentSize, data.source_size ? data.source_size[0] + ' × ' + data.source_size[1] : null);
 
-    drawDetections();
+    // ป้อนผลใหม่ให้ตัววาด แต่ไม่วาดตรงนี้ - ปล่อยให้วงวาดของจอเป็นคนวาด
+    updateRenderTargets(tracks);
   });
 
   socket.addEventListener('error', () => {
@@ -368,7 +409,6 @@ function stopDetection() {
     detection.socket = null;
   }
 
-  detection.lastFaces = [];
   detection.lastSourceSize = null;
   setText(el.detectStatus, 'ปิดอยู่');
 }
@@ -537,56 +577,185 @@ function clearOverlay() {
   ctx.restore();
 }
 
-function drawDetections() {
-  const ctx = el.overlay.getContext('2d');
-  clearOverlay();
+/**
+ * คำนวณตัวคูณสำหรับแปลงพิกัด "ภาพที่ส่งไปตรวจ" ให้เป็น "พิกัดบนจอ"
+ * คืน null ถ้ายังคำนวณไม่ได้ (กล้องยังไม่พร้อม หรือยังไม่เคยได้ผลจาก backend)
+ */
+function getCoordinateTransform() {
+  if (!detection.lastSourceSize) return null;
 
-  if (!detection.lastSourceSize || detection.lastFaces.length === 0) return;
+  const streamSize = camera.streamSize;
+  if (!streamSize) return null;
+
+  const rect = el.video.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return null;
 
   const sentWidth = detection.lastSourceSize[0];
   const sentHeight = detection.lastSourceSize[1];
 
-  const streamSize = camera.streamSize;
-  if (!streamSize) return;
+  return {
+    // ชั้นที่ 1 -> ชั้นที่ 2 : จากภาพที่ส่ง ไปเป็นพิกัดบนสตรีมจริง
+    toStreamX: streamSize.width / sentWidth,
+    toStreamY: streamSize.height / sentHeight,
+    // ชั้นที่ 2 -> ชั้นที่ 3 : จากสตรีมจริง ไปเป็นพิกัดบนจอ
+    toDisplayX: rect.width / streamSize.width,
+    toDisplayY: rect.height / streamSize.height,
+    displayWidth: rect.width,
+    displayHeight: rect.height,
+  };
+}
 
-  const rect = el.video.getBoundingClientRect();
-  const displayWidth = rect.width;
-  const displayHeight = rect.height;
-  if (displayWidth === 0) return;
+/**
+ * รับผลชุดใหม่จาก backend มาตั้งเป็น "เป้าหมาย" ของแต่ละกรอบ
+ *
+ * ไม่วาดที่นี่ เพราะการวาดเป็นหน้าที่ของวงวาดที่เดินตามจังหวะจอ
+ * ที่นี่แค่บอกว่า "กรอบควรจะไปอยู่ตรงไหน" เท่านั้น
+ */
+function updateRenderTargets(tracks) {
+  const seen = new Set();
 
-  // ชั้นที่ 1 -> ชั้นที่ 2 : จากภาพที่ส่ง ไปเป็นพิกัดบนสตรีมจริง
-  const toStreamX = streamSize.width / sentWidth;
-  const toStreamY = streamSize.height / sentHeight;
+  tracks.forEach((t) => {
+    const box = { x: t.bbox[0], y: t.bbox[1], w: t.bbox[2], h: t.bbox[3] };
+    seen.add(t.track_id);
 
-  // ชั้นที่ 2 -> ชั้นที่ 3 : จากสตรีมจริง ไปเป็นพิกัดบนจอ
-  const toDisplayX = displayWidth / streamSize.width;
-  const toDisplayY = displayHeight / streamSize.height;
+    let entry = render.boxes.get(t.track_id);
+
+    if (!entry) {
+      // กรอบใหม่: ให้ตำแหน่งที่วาดเริ่มตรงกับเป้าหมายเลย
+      // ถ้าเริ่มจากที่อื่นแล้วค่อยไหลเข้ามา จะเห็นกรอบวิ่งมาจากมุมจอ ซึ่งดูแปลก
+      entry = {
+        current: Object.assign({}, box),
+        target: box,
+        score: t.score,
+        hits: t.hits,
+        visible: t.visible,
+        missing: t.missing,
+        alpha: 0,          // เริ่มจากโปร่งใสแล้วค่อย ๆ ชัดขึ้น
+        targetAlpha: 1,
+      };
+      render.boxes.set(t.track_id, entry);
+    } else {
+      entry.target = box;
+      entry.score = t.score;
+      entry.hits = t.hits;
+      entry.visible = t.visible;
+      entry.missing = t.missing;
+    }
+
+    // กรอบที่ backend ค้างไว้ (หาใบหน้าไม่เจอชั่วคราว) ให้วาดจาง ๆ
+    // ผู้ใช้จะได้รู้ว่าระบบ "กำลังเดาตำแหน่งอยู่" ไม่ใช่เห็นจริง
+    if (!t.visible) {
+      entry.targetAlpha = FADED_ALPHA;
+    } else if (t.hits >= MIN_HITS_TO_DRAW) {
+      entry.targetAlpha = 1;
+    } else {
+      // เพิ่งเจอเฟรมเดียว ยังไม่แน่ว่าใช่ใบหน้าจริง รอดูอีกเฟรม
+      entry.targetAlpha = 0;
+    }
+  });
+
+  // track ที่หายไปจากผลชุดนี้ = backend ลบทิ้งแล้ว ให้ค่อย ๆ จางหายไป
+  // ไม่ลบทันทีเพื่อไม่ให้กรอบ "ดับวับ" ซึ่งสะดุดตากว่าการจางหาย
+  render.boxes.forEach((entry, trackId) => {
+    if (!seen.has(trackId)) {
+      entry.targetAlpha = 0;
+      entry.dead = true;
+    }
+  });
+}
+
+/**
+ * ค่าที่ใช้ไหลเข้าหาเป้าหมาย โดยไม่ขึ้นกับว่าจอรีเฟรชเร็วแค่ไหน
+ *
+ * ถ้าใช้ค่าคงที่ตรง ๆ (current += (target-current) * 0.35) ความลื่นจะเปลี่ยนไป
+ * ตามอัตรารีเฟรชของจอ คือจอ 144Hz จะไหลเร็วกว่าจอ 60Hz กว่าสองเท่า
+ * สูตรนี้ปรับให้ได้ผลเท่ากันทุกจอ โดยอิงจากเวลาจริงที่ผ่านไป
+ */
+function smoothingFactor(dtMs) {
+  const s = Math.min(0.999, Math.max(0.001, config.tracking.smoothing));
+  return 1 - Math.pow(1 - s, dtMs / 16.667); // 16.667 ms = หนึ่งเฟรมที่ 60Hz
+}
+
+/** ไหลค่าหนึ่งค่าเข้าหาเป้าหมาย */
+function lerp(from, to, k) {
+  return from + (to - from) * k;
+}
+
+/**
+ * วงวาดหลัก - ทำงานทุกเฟรมของจอ (ปกติ 60 ครั้ง/วินาที)
+ *
+ * นี่คือหัวใจของเฟส 3: ของเดิมวาดเฉพาะตอนได้ผลใหม่จาก backend (~8 ครั้ง/วินาที)
+ * ตาคนจึงเห็นกรอบกระโดดเป็นจังหวะ ๆ
+ * พอแยกการวาดออกมาเดินตามจอแล้วไหลตำแหน่งทีละนิด กรอบจะเกาะใบหน้าลื่นขึ้นมาก
+ */
+function renderTick(now) {
+  render.rafId = requestAnimationFrame(renderTick);
+
+  const dt = render.lastTickAt ? (now - render.lastTickAt) : 16.667;
+  render.lastTickAt = now;
+
+  // วัดอัตราการวาดจริงจากช่วง 1 วินาทีล่าสุด
+  render.tickTimestamps.push(now);
+  while (render.tickTimestamps.length && now - render.tickTimestamps[0] > 1000) {
+    render.tickTimestamps.shift();
+  }
+
+  const k = smoothingFactor(dt);
+
+  // ไหลทุกกรอบเข้าหาเป้าหมาย แล้วเก็บกวาดตัวที่จางจนมองไม่เห็นแล้ว
+  render.boxes.forEach((entry, trackId) => {
+    entry.current.x = lerp(entry.current.x, entry.target.x, k);
+    entry.current.y = lerp(entry.current.y, entry.target.y, k);
+    entry.current.w = lerp(entry.current.w, entry.target.w, k);
+    entry.current.h = lerp(entry.current.h, entry.target.h, k);
+    entry.alpha = lerp(entry.alpha, entry.targetAlpha, k);
+
+    if (entry.dead && entry.alpha < 0.02) {
+      render.boxes.delete(trackId);
+    }
+  });
+
+  drawBoxes();
+}
+
+/** วาดกรอบทั้งหมดตามตำแหน่งที่ไหลมาถึงตอนนี้ */
+function drawBoxes() {
+  const ctx = el.overlay.getContext('2d');
+  clearOverlay();
+
+  const tf = getCoordinateTransform();
+  if (!tf) return;
 
   const mirrored = Boolean(config.stream.mirror);
 
   ctx.lineWidth = BOX_LINE_WIDTH;
-  ctx.strokeStyle = BOX_COLOR;
   ctx.font = '600 13px "Sarabun", "Segoe UI", sans-serif';
   ctx.textBaseline = 'top';
+  ctx.lineJoin = 'round';
 
-  detection.lastFaces.forEach((face) => {
-    const b = face.bbox; // [x, y, w, h] ในระบบพิกัดของภาพที่ส่งไป
+  render.boxes.forEach((entry, trackId) => {
+    if (entry.alpha < 0.02) return;
 
-    let x = b[0] * toStreamX * toDisplayX;
-    let y = b[1] * toStreamY * toDisplayY;
-    const w = b[2] * toStreamX * toDisplayX;
-    const h = b[3] * toStreamY * toDisplayY;
+    const c = entry.current;
+
+    let x = c.x * tf.toStreamX * tf.toDisplayX;
+    const y = c.y * tf.toStreamY * tf.toDisplayY;
+    const w = c.w * tf.toStreamX * tf.toDisplayX;
+    const h = c.h * tf.toStreamY * tf.toDisplayY;
 
     // ภาพถูกพลิกกระจกด้วย CSS transform: scaleX(-1) แต่ canvas ไม่ได้ถูกพลิกตาม
     // จึงต้องกลับพิกัดแกน X เอง ไม่งั้นกรอบจะไปโผล่คนละฝั่งกับใบหน้า
     if (mirrored) {
-      x = displayWidth - (x + w);
+      x = tf.displayWidth - (x + w);
     }
 
+    ctx.globalAlpha = entry.alpha;
+
+    ctx.strokeStyle = BOX_COLOR;
     ctx.strokeRect(x, y, w, h);
 
-    // ป้ายคะแนน พร้อมพื้นหลังทึบเพื่อให้อ่านออกบนภาพสว่าง
-    const label = (face.score * 100).toFixed(0) + '%';
+    // ป้ายกำกับ: หมายเลข track + คะแนน (เฟส 4 จะเปลี่ยนเป็นชื่อคน)
+    const label = '#' + trackId + '  ' + (entry.score * 100).toFixed(0) + '%';
     const textWidth = ctx.measureText(label).width;
     const padding = 5;
     const labelHeight = 20;
@@ -594,21 +763,44 @@ function drawDetections() {
     // ถ้าป้ายล้นขอบบนของภาพ ให้ย้ายไปไว้ใต้กรอบแทน
     const labelY = (y - labelHeight - 2 < 0) ? (y + h + 2) : (y - labelHeight - 2);
 
+    // พื้นหลังทึบรองข้อความ เพื่อให้อ่านออกแม้ฉากหลังสว่าง
     ctx.fillStyle = BOX_COLOR;
     ctx.fillRect(x, labelY, textWidth + padding * 2, labelHeight);
 
     ctx.fillStyle = '#ffffff';
     ctx.fillText(label, x + padding, labelY + 3);
-
-    ctx.fillStyle = BOX_COLOR; // คืนค่าให้กรอบถัดไป
   });
+
+  ctx.globalAlpha = 1;
 }
 
-// ขนาดที่แสดงเปลี่ยนได้ตลอด (ย่อ/ขยายหน้าต่าง) ต้องปรับ canvas แล้ววาดใหม่
+function startRenderLoop() {
+  if (render.rafId !== null) return;
+  render.lastTickAt = 0;
+  render.tickTimestamps = [];
+  render.rafId = requestAnimationFrame(renderTick);
+}
+
+function stopRenderLoop() {
+  if (render.rafId !== null) {
+    cancelAnimationFrame(render.rafId);
+    render.rafId = null;
+  }
+  render.boxes.clear();
+  clearOverlay();
+}
+
+// อัปเดตตัวเลขอัตราการวาดทุกครึ่งวินาทีพอ ไม่ต้องอัปเดตทุกเฟรมให้เปลืองเปล่า
+setInterval(() => {
+  if (render.rafId === null) return;
+  setText(el.statRenderFps, render.tickTimestamps.length + ' fps');
+}, 500);
+
+// ขนาดที่แสดงเปลี่ยนได้ตลอด (ย่อ/ขยายหน้าต่าง) ต้องปรับขนาด canvas ตาม
+// ไม่ต้องสั่งวาดเอง เพราะวงวาดเดินอยู่ทุกเฟรมของจออยู่แล้ว
 const resizeObserver = new ResizeObserver(() => {
   if (!camera.isRunning) return;
   syncOverlaySize();
-  drawDetections();
 });
 resizeObserver.observe(el.video);
 
@@ -780,6 +972,7 @@ el.btnRefresh.addEventListener('click', refreshAll);
 // ปิดกล้องให้เรียบร้อยเมื่อออกจากหน้า ไม่ปล่อยให้ไฟกล้องค้าง
 window.addEventListener('beforeunload', () => {
   stopDetection();
+  stopRenderLoop();
   camera.stop();
 });
 

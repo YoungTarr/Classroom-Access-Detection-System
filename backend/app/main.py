@@ -26,6 +26,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.core.frame_source import BrowserFrameSource, FrameDecodeError, create_frame_source
+from app.core.pipeline import create_pipeline
+from app.core.tracker import tracks_to_dicts
 from app.db.database import database
 from app.face.detector import FaceModelError, face_detector
 
@@ -168,7 +170,7 @@ def health(response: Response) -> dict[str, Any]:
         "app": {
             "name": settings.app.name,
             "version": settings.app.version,
-            "phase": 2,
+            "phase": 3,
         },
         "database": {
             "connected": db_health.connected,
@@ -202,6 +204,11 @@ def get_config() -> dict[str, Any]:
         "face": {
             "det_thresh": settings.face.det_thresh,
             "model_pack": settings.face.model_pack,
+        },
+        "tracking": {
+            # หน้าเว็บใช้ค่านี้ทำ interpolate ให้กรอบขยับลื่น
+            "smoothing": settings.tracking.smoothing,
+            "max_missing": settings.tracking.max_missing,
         },
     }
 
@@ -247,9 +254,21 @@ async def websocket_detect(websocket: WebSocket) -> None:
     รูปแบบข้อความออก : JSON
         {
           "frame_id": 123,
-          "faces": [{"bbox": [x, y, w, h], "score": 0.94}],
+          "tracks": [                    ผลหลังผ่านการติดตามข้ามเฟรมแล้ว
+            {
+              "track_id": 3,             คงที่ตลอดที่คนคนนี้ยังอยู่ในภาพ
+              "bbox": [x, y, w, h],
+              "score": 0.94,
+              "visible": true,           false = กรอบที่ค้างไว้เพราะเพิ่งคลาดไป
+              "missing": 0,              จำนวนเฟรมติดกันที่หาไม่เจอ
+              "hits": 27                 จำนวนเฟรมที่เจอสะสม
+            }
+          ],
+          "detected_count": 1,           จำนวนใบหน้าที่ตรวจเจอจริงในเฟรมนี้
           "source_size": [640, 480],     ขนาดของภาพที่ส่งเข้ามา
-          "process_ms": 42.1             เวลาที่ใช้ตรวจจับเฉพาะส่วน AI
+          "process_ms": 42.1,            เวลารวมที่ใช้ประมวลผล
+          "detect_ms": 41.0,
+          "track_ms": 1.1
         }
 
     เรื่อง backpressure: ฝั่งเบราว์เซอร์เป็นคนคุม โดยจะไม่ส่งเฟรมใหม่จนกว่าจะได้
@@ -282,6 +301,10 @@ async def websocket_detect(websocket: WebSocket) -> None:
         await websocket.close(code=1011)
         return
 
+    # สร้าง pipeline ใหม่ต่อหนึ่งการเชื่อมต่อ
+    # เพราะตัวติดตามจำ track ไว้ข้างใน ถ้าใช้ร่วมกันสองแท็บจะจับคู่ใบหน้ากันมั่ว
+    pipeline = create_pipeline()
+
     try:
         while True:
             message = await websocket.receive_bytes()
@@ -307,21 +330,22 @@ async def websocket_detect(websocket: WebSocket) -> None:
                 })
                 continue
 
-            # การตรวจจับเป็นงาน CPU หนักและเป็น blocking
+            # การประมวลผลเป็นงาน CPU หนักและเป็น blocking
             # ต้องโยนไปทำใน thread แยก ไม่งั้นจะบล็อก event loop ทั้งเซิร์ฟเวอร์
             # (ผลคือ request อื่น ๆ เช่น /api/health จะค้างตามไปด้วย)
             started = asyncio.get_running_loop().time()
-            faces = await asyncio.to_thread(face_detector.detect, frame.image)
+            result = await asyncio.to_thread(pipeline.process, frame)
             process_ms = (asyncio.get_running_loop().time() - started) * 1000.0
-
-            width, height = frame.size
 
             await websocket.send_json({
                 "type": "detections",
-                "frame_id": frame_id,
-                "faces": [face.as_dict() for face in faces],
-                "source_size": [width, height],
+                "frame_id": result.frame_id,
+                "tracks": tracks_to_dicts(result.tracks),
+                "detected_count": result.detected_count,
+                "source_size": list(result.source_size),
                 "process_ms": round(process_ms, 1),
+                "detect_ms": round(result.detect_ms, 1),
+                "track_ms": round(result.track_ms, 2),
             })
 
     except WebSocketDisconnect:

@@ -141,7 +141,7 @@ class AppSettings:
     """ค่าทั่วไปของแอปพลิเคชัน"""
 
     name: str = "Classroom Access Detection System"
-    version: str = "0.2.0"  # เฟส 2: ตรวจจับใบหน้าจากเว็บแคม
+    version: str = "0.3.0"  # เฟส 3: ติดตามใบหน้าข้ามเฟรม + กรอบขยับลื่น
     log_level: str = "INFO"
     timezone: str = "Asia/Bangkok"
 
@@ -182,6 +182,39 @@ class FaceSettings:
 
 
 @dataclass(frozen=True)
+class TrackingSettings:
+    """ค่าของการติดตามใบหน้าข้ามเฟรม (tracking)
+
+    จุดประสงค์ของ tracking คือทำให้ใบหน้าเดิม "มี id เดิม" ตลอดที่ยังอยู่ในภาพ
+    ซึ่งจำเป็นมากสำหรับเฟสถัดไป:
+        เฟส 4 - ใช้โหวตผลการจดจำย้อนหลังหลายเฟรม กันชื่อกะพริบสลับไปมา
+        เฟส 5 - ใช้เก็บประวัติตำแหน่งเพื่อคำนวณทิศทางการเคลื่อนที่
+    """
+
+    # ค่า IoU (พื้นที่ทับซ้อน / พื้นที่รวม) ขั้นต่ำที่จะถือว่าเป็นใบหน้าเดียวกัน
+    # สูงไป = ขยับเร็วนิดเดียวก็ถือเป็นคนใหม่, ต่ำไป = คนสองคนที่ยืนติดกันจะถูกจับสลับกัน
+    iou_threshold: float
+
+    # ถ้าจับคู่ด้วย IoU ไม่ได้ (เช่นขยับเร็วจนกรอบไม่ทับกันเลย)
+    # ให้ลองจับคู่ด้วยระยะจุดกึ่งกลางแทน โดยยอมรับระยะไม่เกินสัดส่วนนี้ของความกว้างภาพ
+    # ใช้เป็น "สัดส่วน" ไม่ใช่พิกเซลตายตัว เพื่อให้ทำงานเหมือนกันทุกความละเอียด
+    max_center_distance_ratio: float
+
+    # ใบหน้าหายไปกี่เฟรมติดกันจึงจะลบ track ทิ้ง
+    # การค้างไว้สั้น ๆ คือหัวใจของการกันกรอบกะพริบ เพราะตัวตรวจจับมัก "พลาด"
+    # เป็นครั้งคราวเมื่อหันหน้า เอามือบัง หรือแสงเปลี่ยน
+    max_missing: int
+
+    # จำนวนตำแหน่งย้อนหลังที่เก็บต่อหนึ่ง track (เฟส 5 ใช้คำนวณทิศทาง)
+    history_size: int
+
+    # ความนุ่มนวลของการขยับกรอบฝั่งหน้าเว็บ (0.0-1.0)
+    # 0 = ไม่ขยับเลย, 1 = กระโดดไปตำแหน่งใหม่ทันที (เท่ากับไม่ได้ทำ smoothing)
+    # ค่าน้อย = ลื่นแต่ตามช้า, ค่ามาก = ตามไว แต่กระตุกตามผลดิบมากขึ้น
+    smoothing: float
+
+
+@dataclass(frozen=True)
 class StreamSettings:
     """ค่าที่เกี่ยวกับการรับภาพเข้ามาประมวลผล
 
@@ -216,6 +249,7 @@ class Settings:
     database: DatabaseSettings
     face: FaceSettings
     stream: StreamSettings
+    tracking: TrackingSettings
 
 
 # แหล่งภาพที่ระบบรองรับ - ใส่ค่านอกเหนือจากนี้ต้องฟ้อง ไม่ใช่เงียบ ๆ แล้วใช้ค่า default
@@ -260,6 +294,13 @@ def load_settings() -> Settings:
             send_fps=_get_int("STREAM_SEND_FPS", 10),
             jpeg_quality=_get_float("STREAM_JPEG_QUALITY", 0.7),
             mirror=_get_bool("CAMERA_MIRROR", True),
+        ),
+        tracking=TrackingSettings(
+            iou_threshold=_get_float("TRACK_IOU_THRESHOLD", 0.3),
+            max_center_distance_ratio=_get_float("TRACK_MAX_CENTER_DISTANCE_RATIO", 0.15),
+            max_missing=_get_int("TRACK_MAX_MISSING", 3),
+            history_size=_get_int("TRACK_HISTORY_SIZE", 15),
+            smoothing=_get_float("TRACK_SMOOTHING", 0.35),
         ),
     )
 
