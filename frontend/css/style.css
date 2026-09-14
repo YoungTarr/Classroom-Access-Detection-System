@@ -126,12 +126,149 @@ body {
   cursor: not-allowed;
 }
 
+.btn--primary {
+  border-color: var(--accent);
+  background: rgba(76, 141, 255, 0.15);
+  color: #9ec2ff;
+}
+
 .badge {
   padding: 3px 12px;
   border-radius: 999px;
   background: var(--bg-hover);
   color: var(--text-dim);
   font-size: 13px;
+}
+
+/* ---------------------------------------------------------------------------
+   แถบควบคุมกล้อง
+   --------------------------------------------------------------------------- */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.control-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.control-group__label {
+  font-size: 13px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.select {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+}
+
+/* ---------------------------------------------------------------------------
+   กล่องวิดีโอ + canvas ที่ซ้อนทับ
+
+   หัวใจอยู่ที่ <canvas> ต้องทับ <video> ให้พอดีเป๊ะทั้งตำแหน่งและขนาด
+   ถ้าเหลื่อมแม้แต่นิดเดียว กรอบที่วาดจะไม่ตรงกับใบหน้า
+   --------------------------------------------------------------------------- */
+.video-box {
+  position: relative;      /* เป็นจุดอ้างอิงให้ canvas ที่เป็น absolute */
+  width: 100%;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  /* กันหน้าเว็บกระโดดตอนกล้องยังไม่ส่งภาพ */
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.video-box video {
+  display: block;
+  width: 100%;
+  height: auto;
+  /* ไม่ใช้ object-fit เพื่อไม่ให้เกิดขอบดำ (letterbox)
+     เพราะขอบดำจะทำให้พิกัดที่คำนวณไว้เลื่อนไปจากความจริง */
+}
+
+/* ภาพกระจกเงา - ธรรมชาติกว่าสำหรับเว็บแคม
+   แต่ทำให้ "ซ้ายบนจอ" กลับด้านกับ "ซ้ายจริง" ต้องกลับพิกัดตอนวาดกรอบด้วย
+   (ดูฟังก์ชัน drawDetections ใน js/app.js) */
+.video-box video.is-mirrored {
+  transform: scaleX(-1);
+}
+
+.video-box canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* ให้คลิกทะลุไปโดน element ข้างล่างได้ ไม่งั้น canvas จะบังทุกอย่าง */
+  pointer-events: none;
+}
+
+.video-box__idle {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-dim);
+  text-align: center;
+  padding: 16px;
+}
+
+.video-box__idle p {
+  margin: 0;
+}
+
+.video-box__hint {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* ---------------------------------------------------------------------------
+   ตัวเลขสถานะแบบเรียลไทม์
+   --------------------------------------------------------------------------- */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 12px;
+  background: var(--bg-hover);
+  border-radius: 8px;
+}
+
+.stat__label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.stat__value {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 14px;
 }
 
 /* ---------------------------------------------------------------------------

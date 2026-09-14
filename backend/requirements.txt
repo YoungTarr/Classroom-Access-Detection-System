@@ -1,21 +1,40 @@
 # =============================================================================
 # Python dependencies - Classroom Access Detection System (backend)
 #
-# ทุกตัวในไฟล์นี้ต้องมี wheel สำหรับ linux/arm64 (aarch64)
+# ทุกตัวในไฟล์นี้ตรวจแล้วว่ามี wheel สำหรับ linux/arm64 (aarch64) จริงบน PyPI
 # เพราะปลายทางคือ Raspberry Pi 5 / Ubuntu 24.04 ARM64
-# ถ้าตัวไหนไม่มี wheel จะต้อง build จาก source บน Pi ซึ่งช้ามากหรือพังไปเลย
+# ถ้าไม่มี wheel จะต้อง build จาก source บน Pi ซึ่งช้ามากหรือพังไปเลย
+#
+# วิธีตรวจซ้ำเมื่อจะเพิ่มตัวใหม่:
+#   curl -s https://pypi.org/pypi/<ชื่อ>/json | grep -o '"filename":"[^"]*"' | grep aarch64
+#   ถ้าไม่เจอ aarch64 เลย ให้ดูว่าเป็น py3-none-any หรือไม่ (pure python ใช้ได้ทุกสถาปัตยกรรม)
+#   ถ้าไม่ใช่ทั้งสองอย่าง = ใช้ไม่ได้ ห้ามเดา ให้หยุดแล้วรายงาน
 # =============================================================================
 
-# --- เว็บเฟรมเวิร์ก ---
+# --- เว็บเฟรมเวิร์ก (pure python ทั้งหมด) ---
 fastapi==0.115.6
-# uvicorn[standard] ดึง uvloop / httptools / watchfiles / websockets มาด้วย
-# (ทุกตัวมี wheel aarch64 ครบ) websockets จะได้ใช้จริงตั้งแต่เฟส 2
 uvicorn[standard]==0.34.0
 
-# --- ตัวเชื่อมต่อ PostgreSQL ---
-# psycopg 3 แบบ binary = มี libpq ฝังมาในตัว ไม่ต้องลง libpq-dev ใน image
-# ส่วน pool ใช้ทำ connection pool จะได้ไม่ต้องเปิด connection ใหม่ทุก request
+# --- ตัวเชื่อมต่อ PostgreSQL (มี wheel aarch64) ---
 psycopg[binary,pool]==3.2.3
 
-# --- อ่านไฟล์ .env ตอนรัน backend นอก Docker (ใน Docker ใช้ env_file อยู่แล้ว) ---
+# --- อ่านไฟล์ .env ตอนรัน backend นอก Docker ---
 python-dotenv==1.0.1
+
+# =============================================================================
+# เฟส 2: ตรวจจับใบหน้า
+# =============================================================================
+
+# InsightFace 2.0 เป็น wheel แบบ py3-none-any (pure python ล้วน ไม่มีส่วน C ต้อง compile)
+# ข้อนี้สำคัญมากสำหรับ Pi เพราะเวอร์ชันเก่า (0.7.x) แจกเป็น .tar.gz
+# ซึ่งต้อง build Cython บนเครื่องปลายทาง ใช้เวลานานและพังง่าย
+# ตัวมันจะดึง numpy / onnx / onnxruntime / opencv-python / scipy / scikit-image
+# มาเป็น dependency ให้เอง (ตรวจแล้วมี wheel aarch64 ครบทุกตัว)
+insightface==2.0
+
+# ตัวรันโมเดล ONNX บน CPU (มี wheel aarch64)
+onnxruntime==1.30.0
+
+# ใช้ถอดรหัสภาพ JPEG ที่ส่งมาจากเบราว์เซอร์ และจะใช้อ่าน RTSP ในเฟส 6
+# ตรึงไว้ที่สาย 4.x (5.0 เพิ่งออกใหม่ ยังไม่เสถียรพอสำหรับงานจริง)
+opencv-python==4.14.0.94

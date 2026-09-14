@@ -20,6 +20,72 @@
   <main class="container">
 
     <!-- ===================================================================
+         การ์ดกล้อง - เฟส 2
+         =================================================================== -->
+    <section class="card">
+      <div class="card__header">
+        <h2>กล้องและการตรวจจับใบหน้า</h2>
+        <span class="badge" id="detect-status">ปิดอยู่</span>
+      </div>
+
+      <!-- แถบควบคุม -->
+      <div class="controls">
+        <button type="button" class="btn btn--primary" id="btn-camera">เปิดกล้อง</button>
+
+        <label class="control-group">
+          <span class="control-group__label">กล้อง</span>
+          <select id="camera-select" class="select">
+            <option value="">— กดเปิดกล้องเพื่อดูรายชื่อ —</option>
+          </select>
+        </label>
+      </div>
+
+      <!-- กล่องวิดีโอ: <canvas> ต้องซ้อนทับ <video> ให้พอดีเป๊ะ
+           จึงใช้ position:relative ที่ตัวห่อ แล้ว absolute ที่ canvas -->
+      <div class="video-box" id="video-box">
+        <video id="video" playsinline muted></video>
+        <canvas id="overlay"></canvas>
+
+        <!-- ข้อความตอนยังไม่เปิดกล้อง -->
+        <div class="video-box__idle" id="video-idle">
+          <p>ยังไม่ได้เปิดกล้อง</p>
+          <p class="video-box__hint">ต้องเปิดหน้านี้ผ่าน http://localhost:3000 เท่านั้น</p>
+        </div>
+      </div>
+
+      <!-- ตัวเลขสถานะแบบเรียลไทม์ -->
+      <div class="stats" id="stats">
+        <div class="stat">
+          <span class="stat__label">ความละเอียดกล้อง</span>
+          <span class="stat__value" id="stat-resolution">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat__label">ขนาดที่ส่งตรวจ</span>
+          <span class="stat__value" id="stat-sent-size">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat__label">FPS ที่ส่งจริง</span>
+          <span class="stat__value" id="stat-fps">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat__label">เวลาตรวจจับ</span>
+          <span class="stat__value" id="stat-process">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat__label">ใบหน้าที่เจอ</span>
+          <span class="stat__value" id="stat-faces">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat__label">เฟรมที่ทิ้ง</span>
+          <span class="stat__value" id="stat-dropped">—</span>
+        </div>
+      </div>
+
+      <!-- กล่องแสดงสาเหตุเมื่อกล้องหรือการเชื่อมต่อมีปัญหา -->
+      <div class="alert alert--error" id="camera-error" hidden></div>
+    </section>
+
+    <!-- ===================================================================
          การ์ดสถานะการเชื่อมต่อ
          =================================================================== -->
     <section class="card">
@@ -46,6 +112,14 @@
         <div class="detail__row">
           <dt>จำนวนสมาชิก</dt>
           <dd id="health-db-count">—</dd>
+        </div>
+        <div class="detail__row">
+          <dt>โมเดลใบหน้า</dt>
+          <dd id="health-face-model">—</dd>
+        </div>
+        <div class="detail__row">
+          <dt>แหล่งภาพ</dt>
+          <dd id="health-frame-source">—</dd>
         </div>
         <div class="detail__row">
           <dt>เวลาของเซิร์ฟเวอร์</dt>
@@ -92,6 +166,8 @@
     <span id="footer-version">—</span>
   </footer>
 
+  <!-- camera.js ต้องมาก่อน app.js เพราะ app.js ใช้คลาส CameraController -->
+  <script src="js/camera.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

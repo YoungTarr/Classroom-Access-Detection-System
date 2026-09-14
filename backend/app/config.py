@@ -62,6 +62,32 @@ def _get_int(name: str, default: int) -> int:
         raise ConfigError(f"ค่า {name} ต้องเป็นตัวเลขจำนวนเต็ม แต่ได้รับ: {raw!r}") from exc
 
 
+def _get_float(name: str, default: float) -> float:
+    """อ่านค่าตัวเลขทศนิยม ถ้าแปลงไม่ได้ให้ฟ้องชัดเจนว่าค่าอะไรผิด"""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError as exc:
+        raise ConfigError(f"ค่า {name} ต้องเป็นตัวเลข แต่ได้รับ: {raw!r}") from exc
+
+
+def _get_bool(name: str, default: bool) -> bool:
+    """อ่านค่าจริง/เท็จ รองรับ true/false, 1/0, yes/no (ไม่สนตัวพิมพ์ใหญ่เล็ก)"""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(
+        f"ค่า {name} ต้องเป็น true หรือ false แต่ได้รับ: {raw!r}"
+    )
+
+
 def _get_list(name: str, default: list[str] | None = None) -> list[str]:
     """อ่านค่าที่คั่นด้วยเครื่องหมายจุลภาค เช่น CORS_ORIGINS=http://a,http://b"""
     raw = os.getenv(name)
@@ -115,7 +141,7 @@ class AppSettings:
     """ค่าทั่วไปของแอปพลิเคชัน"""
 
     name: str = "Classroom Access Detection System"
-    version: str = "0.1.0"  # เฟส 1: ฐานข้อมูล + โครงสร้าง Docker
+    version: str = "0.2.0"  # เฟส 2: ตรวจจับใบหน้าจากเว็บแคม
     log_level: str = "INFO"
     timezone: str = "Asia/Bangkok"
 
@@ -127,15 +153,84 @@ class AppSettings:
 
 
 @dataclass(frozen=True)
+class FaceSettings:
+    """ค่าของโมเดลตรวจจับ/จดจำใบหน้า (InsightFace บน onnxruntime)"""
+
+    # ชื่อชุดโมเดล: buffalo_l (แม่นกว่า ใช้ตอน dev) / buffalo_s (เล็กเร็วกว่า ใช้บน Pi)
+    # ต้องตรงกับ --build-arg FACE_MODEL_PACK ที่ใช้ตอน build image
+    # เพราะโมเดลถูกโหลดฝังไว้ใน image ตั้งแต่ตอน build แล้ว
+    model_pack: str
+
+    # โฟลเดอร์แม่ที่เก็บชุดโมเดล โครงสร้างคือ <models_dir>/<model_pack>/*.onnx
+    models_dir: Path
+
+    # ขนาดภาพที่ป้อนให้ตัวตรวจจับ (SCRFD) ยิ่งใหญ่ยิ่งเจอหน้าเล็กได้ดีแต่ช้าลง
+    # 640 คือค่ามาตรฐาน บน Pi อาจลดเหลือ 480 หรือ 320
+    det_size: int
+
+    # คะแนนขั้นต่ำที่จะนับว่าเป็นใบหน้า ต่ำไป = เจอขยะ สูงไป = หน้าเอียงแล้วหลุด
+    det_thresh: float
+
+    # จำนวน thread ที่ onnxruntime ใช้ต่อการประมวลผลหนึ่งครั้ง
+    # 0 = ปล่อยให้ onnxruntime ตัดสินใจเอง (Pi 5 มี 4 core ลองตั้ง 3 ไว้เผื่อ core ให้งานอื่น)
+    num_threads: int
+
+    @property
+    def model_path(self) -> Path:
+        """path เต็มของโฟลเดอร์ชุดโมเดลที่จะโหลด"""
+        return self.models_dir / self.model_pack
+
+
+@dataclass(frozen=True)
+class StreamSettings:
+    """ค่าที่เกี่ยวกับการรับภาพเข้ามาประมวลผล
+
+    ค่าหลายตัวในนี้ frontend เป็นคนใช้ จึงถูกส่งออกไปทาง GET /api/config
+    เพื่อให้ยังคงกฎ "config อยู่ที่เดียว" ไม่ต้องไปตั้งซ้ำในไฟล์ JavaScript
+    """
+
+    # แหล่งภาพ: browser = เว็บแคมผ่าน WebSocket (เฟส 2) / rtsp = กล้อง IP (เฟส 6)
+    source: str
+
+    # ความกว้างที่ย่อภาพก่อนส่งเข้า backend (สูงเกินไป = ช้าและกินแบนด์วิดท์)
+    target_width: int
+
+    # จำนวนเฟรมต่อวินาทีที่เบราว์เซอร์ "พยายาม" ส่ง (ของจริงขึ้นกับความเร็วในการตรวจจับ)
+    send_fps: int
+
+    # คุณภาพ JPEG ตอนเข้ารหัสก่อนส่ง (0.0-1.0)
+    jpeg_quality: float
+
+    # ภาพจากเว็บแคมควรกลับซ้าย-ขวาแบบกระจกเงาหรือไม่
+    # true = ผู้ใช้เห็นตัวเองเหมือนส่องกระจก ซึ่งเป็นธรรมชาติกว่าสำหรับเว็บแคม
+    # ค่านี้มีผลต่อการวาดกรอบด้วย (ต้องกลับพิกัดแกน X ตาม) และจะสำคัญมากในเฟส 5
+    # ตอนคำนวณทิศทางซ้าย/ขวา เพราะ "ซ้ายบนจอ" กับ "ซ้ายในโลกจริง" จะสลับกัน
+    mirror: bool
+
+
+@dataclass(frozen=True)
 class Settings:
     """รวมทุกกลุ่มไว้ในที่เดียว เรียกใช้ผ่านตัวแปร settings ด้านล่าง"""
 
     app: AppSettings
     database: DatabaseSettings
+    face: FaceSettings
+    stream: StreamSettings
+
+
+# แหล่งภาพที่ระบบรองรับ - ใส่ค่านอกเหนือจากนี้ต้องฟ้อง ไม่ใช่เงียบ ๆ แล้วใช้ค่า default
+VALID_FRAME_SOURCES = ("browser", "rtsp")
 
 
 def load_settings() -> Settings:
     """อ่านค่าทั้งหมดจาก environment ครั้งเดียวตอน import โมดูลนี้"""
+    frame_source = _get_str("FRAME_SOURCE", "browser").lower()
+    if frame_source not in VALID_FRAME_SOURCES:
+        raise ConfigError(
+            f"ค่า FRAME_SOURCE ไม่ถูกต้อง: {frame_source!r} "
+            f"(รองรับเฉพาะ {' หรือ '.join(VALID_FRAME_SOURCES)})"
+        )
+
     return Settings(
         app=AppSettings(
             log_level=_get_str("LOG_LEVEL", "INFO").upper(),
@@ -151,6 +246,20 @@ def load_settings() -> Settings:
             name=_get_str("DB_NAME", required=True),
             user=_get_str("DB_USER", required=True),
             password=_get_str("DB_PASSWORD", required=True),
+        ),
+        face=FaceSettings(
+            model_pack=_get_str("FACE_MODEL_PACK", "buffalo_l"),
+            models_dir=Path(_get_str("FACE_MODELS_DIR", "/models/models")),
+            det_size=_get_int("FACE_DET_SIZE", 640),
+            det_thresh=_get_float("FACE_DET_THRESH", 0.5),
+            num_threads=_get_int("FACE_NUM_THREADS", 0),
+        ),
+        stream=StreamSettings(
+            source=frame_source,
+            target_width=_get_int("STREAM_TARGET_WIDTH", 640),
+            send_fps=_get_int("STREAM_SEND_FPS", 10),
+            jpeg_quality=_get_float("STREAM_JPEG_QUALITY", 0.7),
+            mirror=_get_bool("CAMERA_MIRROR", True),
         ),
     )
 
