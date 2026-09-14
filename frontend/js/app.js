@@ -96,6 +96,8 @@ const detection = {
   frameId: 0,            // เลขลำดับเฟรมที่จะส่งครั้งถัดไป
   awaitingResult: false, // ส่งไปแล้วยังไม่ได้ผลกลับ (ใช้ทำ backpressure)
   sendTimer: null,
+  lastSentAt: 0,         // performance.now() ตอนส่งเฟรมล่าสุด
+  watchdogTimer: null,   // กันค้างถ้า backend ไม่ตอบกลับมาเลย
 
   // ผลล่าสุดที่ได้จาก backend
   lastFaces: [],
@@ -294,7 +296,8 @@ function startDetection() {
     detection.droppedFrames = 0;
     detection.sentTimestamps = [];
     setText(el.detectStatus, 'กำลังตรวจจับ');
-    scheduleNextFrame();
+    setText(el.statDropped, '0 เฟรม');
+    scheduleNextFrame(0);
   });
 
   socket.addEventListener('message', (event) => {
@@ -309,11 +312,12 @@ function startDetection() {
     // backend ส่ง type=error มาเมื่อมีปัญหาเฉพาะเฟรมหรือปัญหาทั้งระบบ
     if (data.type === 'error') {
       showAlert(el.cameraError, 'backend แจ้งข้อผิดพลาด: ' + data.message);
-      detection.awaitingResult = false;
+      // ต้องเดินจังหวะต่อ ไม่งั้นวงจรจะหยุดนิ่งถาวรหลังเจอ error ครั้งเดียว
+      onResultSettled();
       return;
     }
 
-    detection.awaitingResult = false;
+    onResultSettled();
     detection.lastFaces = data.faces || [];
     detection.lastSourceSize = data.source_size || null;
     detection.lastProcessMs = data.process_ms;
@@ -353,6 +357,12 @@ function stopDetection() {
     detection.sendTimer = null;
   }
 
+  if (detection.watchdogTimer) {
+    clearTimeout(detection.watchdogTimer);
+    detection.watchdogTimer = null;
+  }
+  detection.awaitingResult = false;
+
   if (detection.socket) {
     detection.socket.close(1000, 'ผู้ใช้ปิดกล้อง');
     detection.socket = null;
@@ -363,18 +373,47 @@ function stopDetection() {
   setText(el.detectStatus, 'ปิดอยู่');
 }
 
-/** ตั้งเวลาส่งเฟรมถัดไปตามอัตราที่ config กำหนด */
-function scheduleNextFrame() {
+/** ช่วงเวลาขั้นต่ำระหว่างเฟรม ตามอัตราที่ config กำหนด */
+function frameIntervalMs() {
+  return 1000 / Math.max(1, config.stream.send_fps);
+}
+
+/**
+ * ตั้งเวลาส่งเฟรมถัดไป
+ *
+ * จังหวะการส่งเป็นแบบ "ยิงต่อเมื่อได้ผลของเฟรมก่อนกลับมาแล้ว" ไม่ใช่ยิงตามนาฬิกาตายตัว
+ *
+ * เหตุผล: ถ้าตั้ง setInterval คงที่ 100 ms แล้วการตรวจจับใช้เวลา ~98 ms
+ * จังหวะจะชนกันพอดี คือ timer ดังตอนที่ผลยังมาไม่ถึง เลยต้องทิ้งเฟรมนั้น
+ * แล้วไปรออีก 100 ms เต็ม ผลคือได้จริงแค่ครึ่งเดียว (~5 fps) และทิ้งเฟรมครึ่งหนึ่งทิ้ง ๆ
+ *
+ * การนับจากเวลาที่ "พร้อมจริง" ทำให้ได้อัตราใกล้เคียงที่ตั้งไว้โดยไม่มีเฟรมค้างในคิว
+ */
+function scheduleNextFrame(delayMs) {
   if (!detection.running) return;
 
-  const intervalMs = 1000 / Math.max(1, config.stream.send_fps);
-  detection.sendTimer = setTimeout(sendFrame, intervalMs);
+  if (detection.sendTimer) clearTimeout(detection.sendTimer);
+  detection.sendTimer = setTimeout(sendFrame, Math.max(0, delayMs));
+}
+
+/** เรียกเมื่อได้ผล (หรือ error) กลับมา เพื่อเดินจังหวะเฟรมถัดไปต่อ */
+function onResultSettled() {
+  detection.awaitingResult = false;
+
+  if (detection.watchdogTimer) {
+    clearTimeout(detection.watchdogTimer);
+    detection.watchdogTimer = null;
+  }
+
+  // หักเวลาที่ใช้ตรวจจับไปแล้วออก จะได้ไม่ช้ากว่าอัตราที่ตั้งไว้โดยไม่จำเป็น
+  const elapsed = performance.now() - detection.lastSentAt;
+  scheduleNextFrame(frameIntervalMs() - elapsed);
 }
 
 /**
  * ส่งหนึ่งเฟรมไปตรวจจับ
  *
- * backpressure: ถ้าเฟรมก่อนหน้ายังไม่ได้ผลกลับมา ให้ "ทิ้งเฟรมนี้ไปเลย"
+ * backpressure: ห้ามส่งเฟรมใหม่ขณะที่เฟรมก่อนยังไม่ได้ผลกลับ ให้ทิ้งเฟรมนั้นไปเลย
  * ห้ามเข้าคิวรอ เพราะถ้า AI ช้ากว่าอัตราที่เราส่ง คิวจะยาวขึ้นเรื่อย ๆ
  * แล้วกรอบที่เห็นจะช้ากว่าภาพจริงมากขึ้นทุกวินาทีจนใช้งานไม่ได้
  */
@@ -382,10 +421,12 @@ async function sendFrame() {
   if (!detection.running || !detection.socket) return;
   if (detection.socket.readyState !== WebSocket.OPEN) return;
 
+  // ปกติจะไม่เข้าเงื่อนไขนี้แล้ว เพราะเราส่งต่อเมื่อได้ผลกลับมาแล้วเท่านั้น
+  // เก็บไว้เป็นตาข่ายกันพลาด (เช่นมี timer ค้างจากการสลับกล้อง)
   if (detection.awaitingResult) {
     detection.droppedFrames += 1;
     setText(el.statDropped, detection.droppedFrames + ' เฟรม');
-    scheduleNextFrame();
+    scheduleNextFrame(frameIntervalMs());
     return;
   }
 
@@ -396,7 +437,8 @@ async function sendFrame() {
     );
 
     if (!captured) {
-      scheduleNextFrame();
+      // กล้องยังไม่พร้อมส่งภาพ รอรอบถัดไป
+      scheduleNextFrame(frameIntervalMs());
       return;
     }
 
@@ -410,14 +452,24 @@ async function sendFrame() {
 
     detection.socket.send(message);
     detection.awaitingResult = true;
+    detection.lastSentAt = performance.now();
 
     recordSentFrame();
 
+    // ถ้า backend ไม่ตอบกลับมาเลย (ค้าง/ตาย) ต้องไม่ปล่อยให้วงจรหยุดนิ่งถาวร
+    // ครบเวลาแล้วให้ถือว่าเฟรมนั้นหายไป แล้วเดินต่อ พร้อมแจ้งให้ผู้ใช้เห็น
+    detection.watchdogTimer = setTimeout(() => {
+      if (!detection.awaitingResult) return;
+      detection.droppedFrames += 1;
+      setText(el.statDropped, detection.droppedFrames + ' เฟรม');
+      showAlert(el.cameraError, 'backend ไม่ตอบกลับภายใน 5 วินาที — กำลังลองเฟรมถัดไป');
+      onResultSettled();
+    }, 5000);
+
   } catch (err) {
     showAlert(el.cameraError, 'ส่งเฟรมไม่สำเร็จ: ' + err.message);
+    scheduleNextFrame(frameIntervalMs());
   }
-
-  scheduleNextFrame();
 }
 
 /** บันทึกเวลาที่ส่งเฟรม แล้วคำนวณ fps จริงจากช่วง 2 วินาทีล่าสุด */

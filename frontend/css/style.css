@@ -233,6 +233,14 @@ body {
   padding: 16px;
 }
 
+/* ต้องเขียนกฎนี้ไว้ด้วย เพราะ .video-box__idle ตั้ง display:flex เอาไว้
+   ซึ่ง specificity สูงกว่ากฎ [hidden]{display:none} ที่เบราว์เซอร์มีมาให้
+   ถ้าไม่มีบรรทัดนี้ การสั่ง element.hidden = true จะไม่มีผล
+   แล้วข้อความ "ยังไม่ได้เปิดกล้อง" จะค้างทับภาพจากกล้องตลอดเวลา */
+.video-box__idle[hidden] {
+  display: none;
+}
+
 .video-box__idle p {
   margin: 0;
 }
