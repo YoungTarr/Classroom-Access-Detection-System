@@ -32,6 +32,7 @@ const CONFIG_FALLBACK = {
   stream: { target_width: 640, send_fps: 10, jpeg_quality: 0.7, mirror: true },
   face: { det_thresh: 0.5, model_pack: '—' },
   tracking: { smoothing: 0.35, max_missing: 3 },
+  direction: { reference: 'world', min_shift_ratio: 0.025, frame_gap: 8 },
 };
 
 /* สีกรอบตามผลการจดจำ (เฟส 4)
@@ -95,6 +96,7 @@ const el = {
   faceModel: byId('health-face-model'),
   identifyInfo: byId('health-identify'),
   frameSource: byId('health-frame-source'),
+  directionInfo: byId('health-direction'),
   btnReloadFaces: byId('btn-reload-faces'),
   reloadResult: byId('reload-result'),
   serverTime: byId('health-server-time'),
@@ -649,6 +651,7 @@ function updateRenderTargets(tracks) {
         missing: t.missing,
         identityState: t.identity_state || 'pending',
         identity: t.identity || null,
+        direction: t.direction || null,
         alpha: 0,          // เริ่มจากโปร่งใสแล้วค่อย ๆ ชัดขึ้น
         targetAlpha: 1,
       };
@@ -661,6 +664,7 @@ function updateRenderTargets(tracks) {
       entry.missing = t.missing;
       entry.identityState = t.identity_state || 'pending';
       entry.identity = t.identity || null;
+      entry.direction = t.direction || null;
     }
 
     // กรอบที่ backend ค้างไว้ (หาใบหน้าไม่เจอชั่วคราว) ให้วาดจาง ๆ
@@ -825,6 +829,37 @@ function drawBoxes() {
 
     ctx.fillStyle = '#0f1420';  // ตัวอักษรสีเข้มบนพื้นสีสด อ่านง่ายกว่าสีขาว
     ctx.fillText(label, labelX + padding, labelY + 4);
+
+    // ---- ป้ายทิศทางการเคลื่อนที่ (เฟส 5) ----
+    // วางไว้ "ใต้กรอบ" เสมอ เพื่อไม่ให้ชนกับป้ายชื่อที่อยู่ด้านบน
+    // ถ้าล้นขอบล่างของภาพก็ย้ายขึ้นมาไว้ในกรอบแทน
+    if (entry.direction) {
+      const dirLabel = entry.direction.label;
+      const dirWidth = ctx.measureText(dirLabel).width + padding * 2;
+      const dirHeight = 21;
+
+      // ถ้าป้ายชื่อถูกดันลงมาอยู่ใต้กรอบแล้ว ให้ป้ายทิศทางลงมาต่อท้ายอีกชั้น
+      const nameLabelIsBelow = labelY > y;
+      let dirY = y + h + 2 + (nameLabelIsBelow ? labelHeight + 2 : 0);
+
+      if (dirY + dirHeight > tf.displayHeight) {
+        dirY = Math.max(0, y + h - dirHeight - 2);
+      }
+
+      let dirX = x;
+      if (dirX + dirWidth > tf.displayWidth) {
+        dirX = Math.max(0, tf.displayWidth - dirWidth);
+      }
+
+      // "อยู่กับที่" ใช้สีเทาเข้มให้ดูเงียบกว่า เพราะไม่ใช่เหตุการณ์ที่ต้องสนใจ
+      // ส่วนตอนเคลื่อนที่ใช้พื้นเข้มตัวหนังสือสว่าง ให้สะดุดตากว่า
+      const moving = entry.direction.value !== 'still';
+      ctx.fillStyle = moving ? 'rgba(15, 20, 32, 0.85)' : 'rgba(15, 20, 32, 0.55)';
+      ctx.fillRect(dirX, dirY, dirWidth, dirHeight);
+
+      ctx.fillStyle = moving ? '#ffffff' : '#93a0b8';
+      ctx.fillText(dirLabel, dirX + padding, dirY + 3);
+    }
   });
 
   ctx.globalAlpha = 1;
@@ -904,6 +939,17 @@ async function loadHealth() {
 
     const src = data.frame_source || {};
     setText(el.frameSource, src.type ? (src.type + (src.alive ? ' (พร้อม)' : ' (ไม่พร้อม)')) : null);
+
+    // บอกให้ชัดว่า "ซ้าย/ขวา" ที่ระบบรายงาน หมายถึงด้านไหน
+    const dirRef = (config.direction && config.direction.reference) || '—';
+    const mirrored = Boolean(config.stream.mirror);
+    let dirText = dirRef;
+    if (dirRef === 'world') {
+      dirText += mirrored ? '  (ตามที่กล้องเห็นจริง — กลับด้านกับที่เห็นบนจอ)' : '  (ตามที่กล้องเห็นจริง)';
+    } else {
+      dirText += mirrored ? '  (ตามที่เห็นบนจอ — จอพลิกกระจกอยู่)' : '  (ตามที่เห็นบนจอ)';
+    }
+    setText(el.directionInfo, dirText);
 
     // คลังใบหน้าว่างไม่ถือว่าระบบพัง (ตรวจจับ/ติดตามยังทำงานได้)
     // แต่ต้องเตือนให้เห็นชัด ไม่งั้นผู้ใช้จะงงว่าทำไมทุกคนขึ้น Unknown

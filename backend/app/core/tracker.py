@@ -32,6 +32,21 @@ logger = logging.getLogger(__name__)
 # ชนิดของกรอบที่ใช้ภายในไฟล์นี้: (x, y, w, h)
 BBox = tuple[int, int, int, int]
 
+# =============================================================================
+# ทิศทางการเคลื่อนที่ (เฟส 5)
+# =============================================================================
+
+DIRECTION_LEFT = "left"
+DIRECTION_RIGHT = "right"
+DIRECTION_STILL = "still"
+
+# ข้อความและลูกศรที่แสดงบนกรอบ
+DIRECTION_LABELS = {
+    DIRECTION_LEFT: "← ไปทางซ้าย",
+    DIRECTION_RIGHT: "ไปทางขวา →",
+    DIRECTION_STILL: "อยู่กับที่",
+}
+
 
 def iou(a: BBox, b: BBox) -> float:
     """คำนวณ Intersection over Union ของกรอบสองอัน
@@ -114,6 +129,20 @@ class Track:
 
     # เฟรมที่ระบุตัวตนครั้งล่าสุด ใช้คุมว่าจะตรวจซ้ำเมื่อไร
     frames_since_identify: int = 999
+
+    # ------------------------------------------------------------------
+    # ส่วนของทิศทางการเคลื่อนที่ (เฟส 5)
+    # ------------------------------------------------------------------
+
+    # ผลการคำนวณทิศทางย้อนหลัง ใช้โหวตกันป้ายกะพริบ (หลักการเดียวกับการโหวตชื่อ)
+    direction_votes: deque = field(default_factory=lambda: deque(maxlen=5))
+
+    # ทิศทางที่ตัดสินแล้ว - อันนี้คือสิ่งที่ส่งไปแสดงบนหน้าจอ
+    direction: str = DIRECTION_STILL
+
+    # ระยะที่เคลื่อนที่ล่าสุด คิดเป็นสัดส่วนของความกว้างภาพ
+    # บวก = ไปทางขวา, ลบ = ไปทางซ้าย (ในกรอบอ้างอิงที่ config กำหนด)
+    direction_shift: float = 0.0
 
     @property
     def is_visible(self) -> bool:
@@ -232,6 +261,17 @@ class Track:
             "hits": self.hits,
         }
 
+        # ทิศทางการเคลื่อนที่ (เฟส 5)
+        data["direction"] = {
+            "value": self.direction,
+            "label": self.direction_label,
+            # ระยะที่เลื่อน คิดเป็นสัดส่วนของความกว้างภาพ (ไว้ debug และจูนเกณฑ์)
+            "shift_ratio": round(float(self.direction_shift), 4),
+            # บอกกรอบอ้างอิงไปด้วยเสมอ เพื่อไม่ให้ใครตีความ "ซ้าย" ผิดด้าน
+            "reference": settings.direction.reference,
+            "mirrored": settings.stream.mirror,
+        }
+
         # ผลที่ผ่านการโหวตแล้วเท่านั้นที่ส่งไปแสดง ไม่ใช่ผลดิบของเฟรมล่าสุด
         data["identity_state"] = self.identity_state
 
@@ -240,6 +280,78 @@ class Track:
             data["identity"]["votes"] = len(self.identity_votes)
 
         return data
+
+    # ------------------------------------------------------------------
+    # คำนวณทิศทางการเคลื่อนที่
+    # ------------------------------------------------------------------
+    def compute_direction(self, frame_width: int) -> None:
+        """สรุปว่า track นี้กำลังเคลื่อนที่ไปทางไหน
+
+        วิธีคิด: เทียบตำแหน่งจุดกึ่งกลางปัจจุบัน กับเมื่อ N เฟรมก่อน
+        แล้วดูว่าเลื่อนไปเกินเกณฑ์หรือยัง
+
+        ที่ต้องเทียบย้อนหลังหลายเฟรมแทนที่จะดูแค่เฟรมก่อนหน้า
+        เพราะตำแหน่งที่ตัวตรวจจับให้มามีสัญญาณรบกวนอยู่ประมาณ 2-3 พิกเซลเสมอ
+        ถ้าดูแค่เฟรมติดกัน คนยืนนิ่งก็จะถูกตัดสินว่าเดินไปมาตลอดเวลา
+        """
+        cfg = settings.direction
+
+        if len(self.history) < 2:
+            return
+
+        # ถ้าประวัติยังสั้นกว่าที่ต้องการ ก็ใช้เท่าที่มี
+        gap = min(cfg.frame_gap, len(self.history) - 1)
+
+        x_now = self.history[-1][0]
+        x_before = self.history[-1 - gap][0]
+
+        # ---- ระยะที่เลื่อน ในกรอบอ้างอิง "world" (ภาพดิบจากกล้อง ไม่พลิกกระจก) ----
+        shift = (x_now - x_before) / float(frame_width)
+
+        # ---- แปลงเป็นกรอบอ้างอิงที่ config ต้องการ ----
+        #
+        # ภาพที่ backend ได้รับไม่เคยถูกพลิกกระจก (camera.js ส่งภาพดิบมาเสมอ)
+        # ดังนั้นค่าที่คำนวณได้ข้างบนจึงเป็นมุมมอง "world" อยู่แล้วโดยธรรมชาติ
+        #
+        # ถ้าต้องการรายงานตามที่ผู้ใช้เห็นบนจอ (screen) และหน้าจอกำลังพลิกกระจกอยู่
+        # ต้องกลับเครื่องหมาย เพราะสิ่งที่วิ่งไปทางขวาในภาพดิบ จะเห็นวิ่งไปทางซ้ายบนจอ
+        if cfg.reference == "screen" and settings.stream.mirror:
+            shift = -shift
+
+        self.direction_shift = shift
+
+        # ---- ตัดสินว่าเคลื่อนที่หรืออยู่กับที่ ----
+        #
+        # ใช้เกณฑ์สองระดับ (hysteresis) เพื่อกันอาการกะพริบ:
+        #   ตอนยังนิ่งอยู่   ใช้เกณฑ์เต็ม  -> ต้องขยับชัดเจนถึงจะเริ่มนับว่าเดิน
+        #   ตอนเดินอยู่แล้ว ใช้เกณฑ์ที่ลดลง -> ต้องช้าลงกว่าเดิมมากถึงจะกลับเป็นนิ่ง
+        # ถ้าใช้เกณฑ์เดียว คนที่เดินช้า ๆ ใกล้เกณฑ์พอดี ป้ายจะสลับไปมาตลอด
+        moving_now = self.direction != DIRECTION_STILL
+        threshold = cfg.min_shift_ratio * (cfg.hysteresis if moving_now else 1.0)
+
+        if abs(shift) >= threshold:
+            candidate = DIRECTION_RIGHT if shift > 0 else DIRECTION_LEFT
+        else:
+            candidate = DIRECTION_STILL
+
+        self.direction_votes.append(candidate)
+        self.direction = self._majority_direction()
+
+    def _majority_direction(self) -> str:
+        """เลือกทิศทางที่ได้เสียงข้างมากจากผลย้อนหลัง"""
+        if not self.direction_votes:
+            return DIRECTION_STILL
+
+        counts: dict[str, int] = {}
+        for value in self.direction_votes:
+            counts[value] = counts.get(value, 0) + 1
+
+        return max(counts.items(), key=lambda kv: kv[1])[0]
+
+    @property
+    def direction_label(self) -> str:
+        """ข้อความพร้อมลูกศรสำหรับแสดงบนกรอบ"""
+        return DIRECTION_LABELS.get(self.direction, DIRECTION_LABELS[DIRECTION_STILL])
 
     @property
     def identity_state(self) -> str:
@@ -296,9 +408,11 @@ class FaceTracker:
         """
         matches, unmatched_faces, unmatched_tracks = self._match(faces, frame_width)
 
-        # 1) track ที่จับคู่ได้ -> อัปเดตตำแหน่งใหม่
+        # 1) track ที่จับคู่ได้ -> อัปเดตตำแหน่งใหม่ แล้วคำนวณทิศทางจากประวัติที่เพิ่งต่อ
         for track_id, face in matches.items():
-            self._tracks[track_id].update(face)
+            track = self._tracks[track_id]
+            track.update(face)
+            track.compute_direction(frame_width)
 
         # 2) ใบหน้าที่จับคู่ไม่ได้ -> เป็นคนใหม่ที่เพิ่งเข้ามาในภาพ
         for face in unmatched_faces:
@@ -338,6 +452,7 @@ class FaceTracker:
             score=face.score,
             history=deque(maxlen=self.history_size),
             identity_votes=deque(maxlen=settings.identify.vote_window),
+            direction_votes=deque(maxlen=settings.direction.vote_window),
         )
         track.history.append(center_of(bbox))
 

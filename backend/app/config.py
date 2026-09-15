@@ -141,7 +141,7 @@ class AppSettings:
     """ค่าทั่วไปของแอปพลิเคชัน"""
 
     name: str = "Classroom Access Detection System"
-    version: str = "0.4.0"  # เฟส 4: จดจำว่าเป็นใคร (FAISS + ชื่อจากฐานข้อมูล)
+    version: str = "0.5.0"  # เฟส 5: ทิศทางการเคลื่อนที่
     log_level: str = "INFO"
     timezone: str = "Asia/Bangkok"
 
@@ -189,6 +189,75 @@ class FaceSettings:
     def rec_model_path(self) -> Path:
         """path เต็มของโฟลเดอร์ชุดโมเดลจดจำใบหน้า"""
         return self.models_dir / self.rec_pack
+
+
+@dataclass(frozen=True)
+class DirectionSettings:
+    """ค่าของการคำนวณทิศทางการเคลื่อนที่ (เฟส 5)
+
+    ============================================================================
+    เรื่องที่ต้องเข้าใจให้ชัดก่อนแก้ไฟล์นี้: "ซ้าย" ของใคร
+    ============================================================================
+
+    ภาพจากเว็บแคมที่แสดงบนหน้าเว็บถูกพลิกกระจก (CSS transform: scaleX(-1))
+    เพื่อให้ผู้ใช้เห็นตัวเองเหมือนส่องกระจก ซึ่งเป็นธรรมชาติกว่า
+    แต่ภาพที่ "ส่งมาให้ backend ประมวลผล" นั้น **ไม่ได้ถูกพลิก** (ดู camera.js)
+
+    ผลคือคำว่า "ซ้าย" มีสองความหมายที่ตรงข้ามกัน:
+
+        world  = ซ้าย/ขวาตามที่กล้องมองเห็นจริง (ภาพดิบ ไม่พลิก)
+                 คนเดินไปทางขวาของภาพ = เดินไปทางขวาของห้องจริง
+
+        screen = ซ้าย/ขวาตามที่ผู้ใช้เห็นบนจอ (หลังพลิกกระจกแล้ว)
+                 คนโบกมือขวา จะเห็นอยู่ฝั่งซ้ายของจอ
+
+    ============================================================================
+    ทำไมเรื่องนี้สำคัญมาก
+    ============================================================================
+
+    เฟส 6 จะมีกล้องสองตัวที่ประตู และทิศทางนี้จะถูกใช้ตัดสินว่า
+    คนคนนั้น "เข้าห้อง" หรือ "ออกจากห้อง"
+
+    ถ้าใช้กรอบอ้างอิงผิด ระบบจะบันทึกเข้า-ออกกลับด้านทั้งหมด
+    ซึ่งเป็นบั๊กที่หาเจอยากมาก เพราะระบบทำงานได้ปกติทุกอย่าง แค่ผลกลับด้าน
+
+    ============================================================================
+    ทำไมค่าตั้งต้นเป็น "screen"
+    ============================================================================
+
+    เพราะมันให้ผลที่ถูกต้องทั้งสองสถานการณ์:
+
+        ตอนทดสอบด้วยเว็บแคม (จอพลิกกระจก)
+            ป้ายทิศทางจะตรงกับที่ผู้ใช้เห็นบนจอ ถ้าใช้ "world" ป้ายจะบอก
+            "ไปทางขวา" ในขณะที่กรอบวิ่งไปทางซ้ายบนจอ ซึ่งดูเหมือนระบบพัง
+
+        ตอนใช้กล้อง IP จริง (เฟส 6 ไม่มีการพลิกกระจก)
+            เมื่อ mirror=false ทั้งสองกรอบอ้างอิงให้ผล "เหมือนกันทุกประการ"
+            การเลือก screen จึงไม่ได้ทำให้เสียความถูกต้องของ IN/OUT เลย
+
+    สรุป: เลือก screen แล้วได้ทั้งความเข้าใจง่ายตอน dev และความถูกต้องตอนใช้จริง
+    ถ้าอยากได้ทิศทางตามภาพดิบที่กล้องเห็นเสมอ ให้เปลี่ยนเป็น world
+    """
+
+    # กรอบอ้างอิงที่ใช้รายงานทิศทาง: "world" (ตามจริง) หรือ "screen" (ตามที่เห็นบนจอ)
+    reference: str
+
+    # เทียบตำแหน่งปัจจุบันกับเมื่อกี่เฟรมก่อน
+    # น้อยไป = ไวแต่สั่นตามการขยับเล็กน้อย, มากไป = นิ่งแต่ตอบสนองช้า
+    frame_gap: int
+
+    # ระยะขั้นต่ำที่ถือว่า "เคลื่อนที่" คิดเป็นสัดส่วนของความกว้างภาพ
+    # ใช้สัดส่วนไม่ใช่พิกเซลตายตัว เพื่อให้ได้ผลเหมือนกันทุกความละเอียด
+    # (ขยับ 20 px บนภาพกว้าง 320 กับ 1280 มีความหมายต่างกันมาก)
+    min_shift_ratio: float
+
+    # ตัวคูณลดเกณฑ์เมื่อ "กำลังเคลื่อนที่อยู่แล้ว" (hysteresis)
+    # ป้องกันอาการกะพริบสลับ เคลื่อนที่ <-> อยู่กับที่ ตอนเดินช้า ๆ
+    # ใกล้เกณฑ์พอดี ค่า 0.6 = พอเริ่มเดินแล้วจะเลิกนับว่าเดินก็ต่อเมื่อช้าลงกว่าเดิมมาก
+    hysteresis: float
+
+    # จำนวนผลย้อนหลังที่เก็บไว้โหวต (กันป้ายทิศทางกะพริบ หลักการเดียวกับการโหวตชื่อ)
+    vote_window: int
 
 
 @dataclass(frozen=True)
@@ -292,6 +361,7 @@ class Settings:
     stream: StreamSettings
     tracking: TrackingSettings
     identify: IdentifySettings
+    direction: DirectionSettings
 
 
 # แหล่งภาพที่ระบบรองรับ - ใส่ค่านอกเหนือจากนี้ต้องฟ้อง ไม่ใช่เงียบ ๆ แล้วใช้ค่า default
@@ -299,6 +369,9 @@ VALID_FRAME_SOURCES = ("browser", "rtsp")
 
 # วิธีระบุตัวตนที่ระบบรองรับ (อนาคตอาจเพิ่ม rfid / qr)
 VALID_IDENTIFIERS = ("face",)
+
+# กรอบอ้างอิงของทิศทาง - อ่านคำอธิบายเต็มใน DirectionSettings ก่อนเปลี่ยนค่า
+VALID_DIRECTION_REFERENCES = ("world", "screen")
 
 
 def load_settings() -> Settings:
@@ -315,6 +388,13 @@ def load_settings() -> Settings:
         raise ConfigError(
             f"ค่า IDENTIFIER ไม่ถูกต้อง: {identifier_mode!r} "
             f"(รองรับเฉพาะ {' หรือ '.join(VALID_IDENTIFIERS)})"
+        )
+
+    direction_reference = _get_str("DIRECTION_REFERENCE", "screen").lower()
+    if direction_reference not in VALID_DIRECTION_REFERENCES:
+        raise ConfigError(
+            f"ค่า DIRECTION_REFERENCE ไม่ถูกต้อง: {direction_reference!r} "
+            f"(รองรับเฉพาะ {' หรือ '.join(VALID_DIRECTION_REFERENCES)})"
         )
 
     return Settings(
@@ -348,6 +428,13 @@ def load_settings() -> Settings:
             vote_window=_get_int("IDENTITY_VOTE_WINDOW", 7),
             min_votes=_get_int("IDENTITY_MIN_VOTES", 3),
             recheck_interval=_get_int("IDENTITY_RECHECK_INTERVAL", 15),
+        ),
+        direction=DirectionSettings(
+            reference=direction_reference,
+            frame_gap=_get_int("DIRECTION_FRAME_GAP", 8),
+            min_shift_ratio=_get_float("DIRECTION_MIN_SHIFT_RATIO", 0.025),
+            hysteresis=_get_float("DIRECTION_HYSTERESIS", 0.6),
+            vote_window=_get_int("DIRECTION_VOTE_WINDOW", 5),
         ),
         stream=StreamSettings(
             source=frame_source,

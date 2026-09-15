@@ -213,7 +213,7 @@ def health(response: Response) -> dict[str, Any]:
         "app": {
             "name": settings.app.name,
             "version": settings.app.version,
-            "phase": 4,
+            "phase": 5,
         },
         "database": {
             "connected": db_health.connected,
@@ -296,6 +296,12 @@ def get_config() -> dict[str, Any]:
             # หน้าเว็บใช้ค่านี้ทำ interpolate ให้กรอบขยับลื่น
             "smoothing": settings.tracking.smoothing,
             "max_missing": settings.tracking.max_missing,
+        },
+        "direction": {
+            # ส่งกรอบอ้างอิงไปให้หน้าเว็บแสดงด้วย เพื่อไม่ให้ผู้ใช้ตีความ "ซ้าย" ผิดด้าน
+            "reference": settings.direction.reference,
+            "min_shift_ratio": settings.direction.min_shift_ratio,
+            "frame_gap": settings.direction.frame_gap,
         },
     }
 
