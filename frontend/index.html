@@ -28,8 +28,8 @@
         <span class="badge" id="detect-status">ปิดอยู่</span>
       </div>
 
-      <!-- แถบควบคุม -->
-      <div class="controls">
+      <!-- แถบควบคุมโหมดเว็บแคม (ซ่อนอัตโนมัติเมื่อ FRAME_SOURCE=rtsp) -->
+      <div class="controls" id="controls-webcam">
         <button type="button" class="btn btn--primary" id="btn-camera">เปิดกล้อง</button>
 
         <label class="control-group">
@@ -40,16 +40,33 @@
         </label>
       </div>
 
-      <!-- กล่องวิดีโอ: <canvas> ต้องซ้อนทับ <video> ให้พอดีเป๊ะ
-           จึงใช้ position:relative ที่ตัวห่อ แล้ว absolute ที่ canvas -->
+      <!-- แถบควบคุมโหมดกล้อง IP (ซ่อนอัตโนมัติเมื่อ FRAME_SOURCE=browser) -->
+      <div class="controls" id="controls-rtsp" hidden>
+        <button type="button" class="btn btn--primary" id="btn-stream">เริ่มดูภาพสด</button>
+
+        <label class="control-group">
+          <span class="control-group__label">กล้อง IP</span>
+          <select id="rtsp-select" class="select">
+            <option value="">— กำลังโหลดรายชื่อกล้อง —</option>
+          </select>
+        </label>
+      </div>
+
+      <!-- กล่องวิดีโอ: <canvas> ที่วาดกรอบต้องซ้อนทับภาพให้พอดีเป๊ะ
+           จึงใช้ position:relative ที่ตัวห่อ แล้ว absolute ที่ canvas
+
+           มีพื้นที่แสดงภาพ 2 แบบ ใช้ทีละแบบตามโหมด:
+             <video>  = เว็บแคมของผู้ใช้ (เบราว์เซอร์เล่นเอง)
+             <canvas> = ภาพจากกล้อง IP ที่ backend push มาทีละเฟรม -->
       <div class="video-box" id="video-box">
         <video id="video" playsinline muted></video>
+        <canvas id="stream-canvas" hidden></canvas>
         <canvas id="overlay"></canvas>
 
         <!-- ข้อความตอนยังไม่เปิดกล้อง -->
         <div class="video-box__idle" id="video-idle">
-          <p>ยังไม่ได้เปิดกล้อง</p>
-          <p class="video-box__hint">ต้องเปิดหน้านี้ผ่าน http://localhost:3000 เท่านั้น</p>
+          <p id="video-idle-text">ยังไม่ได้เปิดกล้อง</p>
+          <p class="video-box__hint" id="video-idle-hint">ต้องเปิดหน้านี้ผ่าน http://localhost:3000 เท่านั้น</p>
         </div>
       </div>
 
@@ -66,6 +83,12 @@
         <div class="stat">
           <span class="stat__label">FPS ที่ส่งจริง</span>
           <span class="stat__value" id="stat-fps">—</span>
+        </div>
+        <!-- อายุของเฟรมตอนถึงหน้าจอ - ตัวเลขนี้ต้องไม่ไต่ขึ้นเรื่อย ๆ
+             ถ้าไต่ขึ้นแปลว่ามีคิวเฟรมสะสมอยู่ที่ไหนสักแห่ง -->
+        <div class="stat" id="stat-latency-box" hidden>
+          <span class="stat__label">อายุเฟรม (latency)</span>
+          <span class="stat__value" id="stat-latency">—</span>
         </div>
         <div class="stat">
           <span class="stat__label">เวลาตรวจจับ</span>

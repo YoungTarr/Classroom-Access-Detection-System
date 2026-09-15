@@ -64,13 +64,25 @@ const byId = (id) => document.getElementById(id);
 const el = {
   phaseBadge: byId('phase-badge'),
 
-  // กล้อง
+  // กล้อง (เว็บแคม)
+  controlsWebcam: byId('controls-webcam'),
   btnCamera: byId('btn-camera'),
   cameraSelect: byId('camera-select'),
+
+  // กล้อง IP (เฟส 6)
+  controlsRtsp: byId('controls-rtsp'),
+  btnStream: byId('btn-stream'),
+  rtspSelect: byId('rtsp-select'),
+  streamCanvas: byId('stream-canvas'),
+  statLatency: byId('stat-latency'),
+  statLatencyBox: byId('stat-latency-box'),
+
   videoBox: byId('video-box'),
   video: byId('video'),
   overlay: byId('overlay'),
   videoIdle: byId('video-idle'),
+  videoIdleText: byId('video-idle-text'),
+  videoIdleHint: byId('video-idle-hint'),
   cameraError: byId('camera-error'),
   detectStatus: byId('detect-status'),
 
@@ -561,9 +573,9 @@ function recordSentFrame() {
 // และเมื่อภาพเป็นกระจกเงา ต้องกลับพิกัดแกน X อีกชั้นหนึ่งด้วย
 // ===========================================================================
 
-/** ปรับขนาดและตำแหน่ง canvas ให้ทับ <video> พอดีเป๊ะ */
+/** ปรับขนาดและตำแหน่ง canvas ที่วาดกรอบ ให้ทับพื้นที่แสดงภาพพอดีเป๊ะ */
 function syncOverlaySize() {
-  const videoRect = el.video.getBoundingClientRect();
+  const videoRect = getDisplayElement().getBoundingClientRect();
   if (videoRect.width === 0 || videoRect.height === 0) return;
 
   // ต้องวาง canvas ตาม "ตำแหน่งจริงของวิดีโอภายในกล่อง" ไม่ใช่ปักไว้ที่มุมซ้ายบนเฉย ๆ
@@ -597,16 +609,35 @@ function clearOverlay() {
 }
 
 /**
+ * element ที่ใช้แสดงภาพในโหมดปัจจุบัน
+ *   โหมด browser -> <video> ที่เล่นเว็บแคม
+ *   โหมด rtsp    -> <canvas> ที่เราวาดเฟรมจาก backend ลงไป
+ */
+function getDisplayElement() {
+  return isRtspMode() ? el.streamCanvas : el.video;
+}
+
+/** ขนาดจริงของภาพต้นทาง (ไม่ใช่ขนาดที่แสดงบนจอ) */
+function getStreamSize() {
+  if (isRtspMode()) {
+    // ในโหมด rtsp ภาพที่ส่งมาคือเฟรมเต็ม ขนาดจึงเท่ากับขนาดที่ใช้ตรวจจับพอดี
+    if (!el.streamCanvas.width) return null;
+    return { width: el.streamCanvas.width, height: el.streamCanvas.height };
+  }
+  return camera.streamSize;
+}
+
+/**
  * คำนวณตัวคูณสำหรับแปลงพิกัด "ภาพที่ส่งไปตรวจ" ให้เป็น "พิกัดบนจอ"
  * คืน null ถ้ายังคำนวณไม่ได้ (กล้องยังไม่พร้อม หรือยังไม่เคยได้ผลจาก backend)
  */
 function getCoordinateTransform() {
   if (!detection.lastSourceSize) return null;
 
-  const streamSize = camera.streamSize;
+  const streamSize = getStreamSize();
   if (!streamSize) return null;
 
-  const rect = el.video.getBoundingClientRect();
+  const rect = getDisplayElement().getBoundingClientRect();
   if (rect.width === 0 || rect.height === 0) return null;
 
   const sentWidth = detection.lastSourceSize[0];
@@ -896,6 +927,288 @@ const resizeObserver = new ResizeObserver(() => {
 resizeObserver.observe(el.video);
 
 // ===========================================================================
+// ส่วนที่ 4.5: โหมดกล้อง IP (เฟส 6)
+//
+// ต่างจากโหมดเว็บแคมตรงทิศทางของภาพ:
+//     โหมด browser : เบราว์เซอร์จับภาพเอง แล้วส่งไปให้ backend ตรวจ
+//     โหมด rtsp    : backend ต่อกล้องเอง ตรวจเสร็จแล้ว push ภาพ+ผล มาให้หน้าเว็บ
+//
+// หน้าเว็บจึงไม่ต้องขอสิทธิ์ใช้กล้องเลยในโหมดนี้ และเปิดดูจากเครื่องไหนก็ได้
+// ไม่ติดข้อจำกัด localhost/HTTPS แบบเว็บแคม
+// ===========================================================================
+
+const rtsp = {
+  socket: null,
+  running: false,
+  cameraId: null,
+  ctx: null,          // context ของ canvas ที่วาดภาพ
+
+  frameTimestamps: [], // ใช้คำนวณ fps ที่ได้รับจริง
+};
+
+/** ตอนนี้อยู่ในโหมดกล้อง IP หรือไม่ */
+function isRtspMode() {
+  return config.stream && config.stream.source === 'rtsp';
+}
+
+/** โหลดรายชื่อกล้อง IP มาเติม dropdown */
+async function loadCameraList() {
+  try {
+    const res = await fetch('/api/cameras', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+
+    el.rtspSelect.replaceChildren();
+    const cameras = (data.cameras || []).filter((c) => c.enabled);
+
+    if (cameras.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = '— ไม่มีกล้องที่เปิดใช้งาน (ตรวจ CAMERA_IDS ใน .env) —';
+      el.rtspSelect.appendChild(opt);
+      return [];
+    }
+
+    cameras.forEach((cam) => {
+      const opt = document.createElement('option');
+      opt.value = cam.id;
+      // บอกสถานะไปในชื่อเลย ผู้ใช้จะได้รู้ทันทีว่ากล้องตัวไหนหลุดอยู่
+      const state = cam.alive ? '🟢' : (cam.connected ? '🟡' : '🔴');
+      opt.textContent = state + ' ' + cam.name + ' (' + cam.direction + ')';
+      el.rtspSelect.appendChild(opt);
+    });
+
+    return cameras;
+  } catch (err) {
+    showAlert(el.cameraError, 'โหลดรายชื่อกล้องไม่สำเร็จ: ' + err.message);
+    return [];
+  }
+}
+
+/** แกะข้อความ binary ที่ backend ส่งมา: [4 ไบต์ความยาว JSON][JSON][JPEG] */
+function decodeStreamMessage(buffer) {
+  const view = new DataView(buffer);
+  const jsonLength = view.getUint32(0, true);   // true = little-endian
+
+  const jsonBytes = new Uint8Array(buffer, 4, jsonLength);
+  const meta = JSON.parse(new TextDecoder('utf-8').decode(jsonBytes));
+
+  const jpegBytes = new Uint8Array(buffer, 4 + jsonLength);
+
+  return { meta: meta, jpeg: jpegBytes };
+}
+
+async function startStream() {
+  if (rtsp.socket) return;
+
+  const cameraId = el.rtspSelect.value;
+  if (!cameraId) {
+    showAlert(el.cameraError, 'ยังไม่ได้เลือกกล้อง');
+    return;
+  }
+
+  showAlert(el.cameraError, null);
+  rtsp.cameraId = cameraId;
+  rtsp.frameTimestamps = [];
+  rtsp.ctx = el.streamCanvas.getContext('2d', { alpha: false });
+
+  const socket = new WebSocket(buildWebSocketUrl('/ws/stream?camera=' + encodeURIComponent(cameraId)));
+  socket.binaryType = 'arraybuffer';
+  rtsp.socket = socket;
+
+  setText(el.detectStatus, 'กำลังเชื่อมต่อ…');
+
+  socket.addEventListener('open', () => {
+    rtsp.running = true;
+    setText(el.detectStatus, 'กำลังรับภาพสด');
+    el.videoIdle.hidden = true;
+    el.streamCanvas.hidden = false;
+    el.video.hidden = true;
+    el.btnStream.textContent = 'หยุดดูภาพสด';
+    el.btnStream.classList.remove('btn--primary');
+    el.statLatencyBox.hidden = false;
+    startRenderLoop();
+  });
+
+  socket.addEventListener('message', async (event) => {
+    // ข้อความที่เป็นข้อความล้วน = แจ้งสถานะหรือ error
+    if (typeof event.data === 'string') {
+      let data;
+      try { data = JSON.parse(event.data); } catch { return; }
+
+      if (data.type === 'error') {
+        showAlert(el.cameraError, 'backend แจ้งข้อผิดพลาด: ' + data.message);
+        return;
+      }
+
+      if (data.type === 'camera_status') {
+        handleCameraStatus(data);
+        return;
+      }
+      return;
+    }
+
+    // ข้อความ binary = หนึ่งเฟรมพร้อมผลตรวจจับ
+    await handleStreamFrame(event.data);
+  });
+
+  socket.addEventListener('close', (event) => {
+    rtsp.running = false;
+    rtsp.socket = null;
+    setText(el.detectStatus, 'ตัดการเชื่อมต่อแล้ว');
+
+    if (!event.wasClean) {
+      showAlert(
+        el.cameraError,
+        'การเชื่อมต่อกับ backend หลุด (code ' + event.code + ') — ' +
+        'ตรวจ log ด้วย docker compose logs backend'
+      );
+    }
+  });
+}
+
+/** จัดการข้อความแจ้งว่ากล้องหลุดหรือกลับมา */
+function handleCameraStatus(data) {
+  const status = data.status || {};
+
+  if (data.alive) {
+    showAlert(el.cameraError, null);
+    setText(el.detectStatus, 'กำลังรับภาพสด');
+    return;
+  }
+
+  // กล้องหลุด - บอกให้ชัดว่าเกิดอะไรขึ้นและระบบกำลังทำอะไรอยู่
+  // ไม่ปล่อยให้ภาพค้างเงียบ ๆ จนผู้ใช้นึกว่ายังปกติ
+  setText(el.detectStatus, 'กล้องไม่ส่งภาพ');
+  showAlert(
+    el.cameraError,
+    'กล้อง "' + (status.name || data.camera) + '" ไม่ส่งภาพแล้ว\n' +
+    'สาเหตุ: ' + (status.error || 'ไม่ทราบ') + '\n' +
+    'ต่อใหม่ไปแล้ว ' + (status.reconnects || 0) + ' ครั้ง — ระบบจะพยายามต่อใหม่ให้เองเรื่อย ๆ'
+  );
+}
+
+/** รับหนึ่งเฟรมจาก backend มาวาดลง canvas แล้วอัปเดตกรอบ */
+async function handleStreamFrame(buffer) {
+  let decoded;
+  try {
+    decoded = decodeStreamMessage(buffer);
+  } catch (err) {
+    showAlert(el.cameraError, 'อ่านข้อมูลเฟรมไม่สำเร็จ: ' + err.message);
+    return;
+  }
+
+  const meta = decoded.meta;
+
+  // ---- วาดภาพลง canvas ----
+  // ใช้ createImageBitmap เพราะถอดรหัส JPEG นอก main thread ได้
+  // เร็วกว่าการสร้าง <img> แล้วรอ onload มาก และไม่ต้องคอย revoke object URL
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(new Blob([decoded.jpeg], { type: 'image/jpeg' }));
+  } catch (err) {
+    return; // เฟรมเสียหนึ่งเฟรมไม่ใช่เรื่องใหญ่ รอเฟรมถัดไป
+  }
+
+  if (el.streamCanvas.width !== bitmap.width || el.streamCanvas.height !== bitmap.height) {
+    el.streamCanvas.width = bitmap.width;
+    el.streamCanvas.height = bitmap.height;
+    syncOverlaySize();
+    setText(el.statResolution, bitmap.width + ' × ' + bitmap.height);
+  }
+
+  rtsp.ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+
+  // ---- อัปเดตกรอบและตัวเลขสถานะ ----
+  detection.lastSourceSize = meta.source_size || null;
+
+  const tracks = meta.tracks || [];
+  const knownCount = tracks.filter((t) => t.identity_state === 'recognized').length;
+
+  setText(el.statSentSize, meta.source_size ? meta.source_size[0] + ' × ' + meta.source_size[1] : null);
+  setText(el.statProcess, meta.detect_ms + ' ms (ตรวจ ' + meta.detect_ms + ' + จดจำ ' + meta.identify_ms + ')');
+  setText(el.statFaces, meta.detected_count + ' คน');
+  setText(el.statTracks, tracks.length + ' track');
+  setText(el.statKnown, knownCount + ' / ' + tracks.length + ' คน');
+  setText(el.statLatency, meta.frame_age_ms + ' ms');
+
+  recordStreamFrame();
+  updateRenderTargets(tracks);
+}
+
+/** นับ fps ของภาพที่ได้รับจริงจาก backend */
+function recordStreamFrame() {
+  const now = performance.now();
+  rtsp.frameTimestamps.push(now);
+  while (rtsp.frameTimestamps.length && now - rtsp.frameTimestamps[0] > 2000) {
+    rtsp.frameTimestamps.shift();
+  }
+  const span = now - rtsp.frameTimestamps[0];
+  if (span > 500 && rtsp.frameTimestamps.length > 1) {
+    const fps = ((rtsp.frameTimestamps.length - 1) * 1000) / span;
+    setText(el.statFps, fps.toFixed(1) + ' fps');
+  }
+}
+
+function stopStream() {
+  rtsp.running = false;
+
+  if (rtsp.socket) {
+    rtsp.socket.close(1000, 'ผู้ใช้หยุดดูภาพ');
+    rtsp.socket = null;
+  }
+
+  stopRenderLoop();
+
+  el.videoIdle.hidden = false;
+  el.streamCanvas.hidden = true;
+  el.btnStream.textContent = 'เริ่มดูภาพสด';
+  el.btnStream.classList.add('btn--primary');
+
+  setText(el.detectStatus, 'ปิดอยู่');
+  ['statResolution', 'statSentSize', 'statFps', 'statProcess',
+   'statFaces', 'statTracks', 'statKnown', 'statRenderFps', 'statLatency'
+  ].forEach((key) => setText(el[key], null));
+}
+
+el.btnStream.addEventListener('click', () => {
+  if (rtsp.socket) {
+    stopStream();
+  } else {
+    startStream();
+  }
+});
+
+// สลับกล้องระหว่างที่ดูอยู่ = ต่อใหม่ไปกล้องตัวนั้นทันที
+el.rtspSelect.addEventListener('change', () => {
+  if (rtsp.socket) {
+    stopStream();
+    startStream();
+  }
+});
+
+/** ตั้งค่าหน้าเว็บให้ตรงกับโหมดที่ backend ใช้อยู่ */
+async function applySourceMode() {
+  const rtspMode = isRtspMode();
+
+  el.controlsWebcam.hidden = rtspMode;
+  el.controlsRtsp.hidden = !rtspMode;
+
+  if (rtspMode) {
+    el.video.hidden = true;
+    setText(el.videoIdleText, 'ยังไม่ได้เริ่มดูภาพสด');
+    setText(el.videoIdleHint, 'ภาพมาจากกล้อง IP ที่ backend ต่ออยู่ ไม่ได้ใช้กล้องของเครื่องนี้');
+    await loadCameraList();
+  } else {
+    el.video.hidden = false;
+    el.streamCanvas.hidden = true;
+    setText(el.videoIdleText, 'ยังไม่ได้เปิดกล้อง');
+    setText(el.videoIdleHint, 'ต้องเปิดหน้านี้ผ่าน http://localhost:3000 เท่านั้น');
+  }
+}
+
+// ===========================================================================
 // ส่วนที่ 5: สถานะระบบ + รายชื่อสมาชิก (เฟส 1)
 // ===========================================================================
 async function loadHealth() {
@@ -1156,11 +1469,21 @@ window.addEventListener('beforeunload', () => {
   stopDetection();
   stopRenderLoop();
   camera.stop();
+  if (rtsp.socket) rtsp.socket.close(1000, 'ปิดหน้าเว็บ');
 });
 
 // เริ่มทำงาน
 (async function init() {
   await loadConfig();
+  await applySourceMode();
   await refreshAll();
   setInterval(refreshAll, AUTO_REFRESH_MS);
+
+  // โหมดกล้อง IP: อัปเดตสถานะกล้องใน dropdown เป็นระยะ
+  // เพื่อให้เห็นทันทีเมื่อกล้องหลุดหรือกลับมา แม้ยังไม่ได้กดดูภาพ
+  if (isRtspMode()) {
+    setInterval(() => {
+      if (!rtsp.socket) loadCameraList();
+    }, AUTO_REFRESH_MS);
+  }
 })();

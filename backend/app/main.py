@@ -15,8 +15,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import struct
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -25,7 +27,12 @@ from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.core.frame_source import BrowserFrameSource, FrameDecodeError, create_frame_source
+from app.core.frame_source import (
+    BrowserFrameSource,
+    FrameDecodeError,
+    RTSPFrameSource,
+    create_frame_sources,
+)
 from app.core.pipeline import create_pipeline
 from app.core.tracker import tracks_to_dicts
 from app.db.database import database
@@ -120,12 +127,26 @@ async def lifespan(_: FastAPI):
         app.state.identifier_error = "ข้ามการสร้างคลังใบหน้า เพราะโหลดโมเดลไม่สำเร็จ"
 
     # ---- เตรียมแหล่งภาพ ----
-    app.state.frame_source = create_frame_source(settings.stream.source)
-    app.state.frame_source.start()
+    # เป็น dict เพราะโหมด rtsp มีได้หลายกล้องพร้อมกัน
+    app.state.frame_sources = create_frame_sources(settings.stream.source)
+    for source in app.state.frame_sources.values():
+        source.start()
+
+    if settings.stream.source == "rtsp":
+        for camera in settings.rtsp.cameras:
+            logger.info(
+                "กล้อง %s (%s) ทิศทาง %s -> %s  [%s]",
+                camera.id,
+                camera.name,
+                camera.direction,
+                camera.safe_url(),  # ปิดบังรหัสผ่านไว้แล้ว
+                "เปิดใช้งาน" if camera.enabled else "ปิดอยู่",
+            )
 
     yield
 
-    app.state.frame_source.stop()
+    for source in app.state.frame_sources.values():
+        source.stop()
     database.close()
     logger.info("ปิดระบบเรียบร้อย")
 
@@ -188,13 +209,20 @@ def health(response: Response) -> dict[str, Any]:
             "error": getattr(app.state, "identifier_error", None) or "ยังไม่ได้สร้าง",
         }
 
-    frame_source = getattr(app.state, "frame_source", None)
+    sources = getattr(app.state, "frame_sources", {}) or {}
     source_status: dict[str, Any] = {
         "type": settings.stream.source,
-        "alive": frame_source.is_alive() if frame_source else False,
+        "alive": any(s.is_alive() for s in sources.values()),
     }
-    if isinstance(frame_source, BrowserFrameSource):
-        source_status["received_frames"] = frame_source.received_count
+
+    browser_source = sources.get("browser")
+    if isinstance(browser_source, BrowserFrameSource):
+        source_status["received_frames"] = browser_source.received_count
+
+    # โหมด rtsp รายงานสถานะทีละกล้อง เพื่อให้รู้ว่าตัวไหนหลุด
+    rtsp_sources = [s for s in sources.values() if isinstance(s, RTSPFrameSource)]
+    if rtsp_sources:
+        source_status["cameras"] = [s.status() for s in rtsp_sources]
 
     db_ok = db_health.connected and db_health.error is None
     face_ok = face_status["loaded"] and face_status["recognition_loaded"]
@@ -213,7 +241,7 @@ def health(response: Response) -> dict[str, Any]:
         "app": {
             "name": settings.app.name,
             "version": settings.app.version,
-            "phase": 5,
+            "phase": 6,
         },
         "database": {
             "connected": db_health.connected,
@@ -306,6 +334,34 @@ def get_config() -> dict[str, Any]:
     }
 
 
+@app.get("/api/cameras", tags=["ระบบ"])
+def list_cameras() -> dict[str, Any]:
+    """รายการกล้อง IP พร้อมสถานะการเชื่อมต่อของแต่ละตัว
+
+    หน้าเว็บใช้สร้างรายการให้ผู้ใช้เลือกดู และใช้แสดงว่ากล้องตัวไหนหลุดอยู่
+    URL ที่ส่งออกไปถูกปิดบังรหัสผ่านไว้แล้วเสมอ
+    """
+    sources = getattr(app.state, "frame_sources", {}) or {}
+
+    cameras = []
+    for camera in settings.rtsp.cameras:
+        entry: dict[str, Any] = {
+            "id": camera.id,
+            "name": camera.name,
+            "direction": camera.direction,
+            "enabled": camera.enabled,
+            "url": camera.safe_url(),
+        }
+
+        source = sources.get(camera.id)
+        if isinstance(source, RTSPFrameSource):
+            entry.update(source.status())
+
+        cameras.append(entry)
+
+    return {"source": settings.stream.source, "total": len(cameras), "cameras": cameras}
+
+
 @app.get("/api/members", tags=["สมาชิก"])
 def list_members() -> dict[str, Any]:
     """คืนรายชื่อสมาชิกทั้งหมด เรียงตามนามสกุลแล้วชื่อ
@@ -382,7 +438,7 @@ async def websocket_detect(websocket: WebSocket) -> None:
         logger.warning("ปิด WebSocket เพราะโมเดลไม่พร้อม: %s", reason)
         return
 
-    frame_source = app.state.frame_source
+    frame_source = getattr(app.state, "frame_sources", {}).get("browser")
     if not isinstance(frame_source, BrowserFrameSource):
         await websocket.send_json({
             "type": "error",
@@ -452,4 +508,192 @@ async def websocket_detect(websocket: WebSocket) -> None:
             await websocket.close(code=1011)
         except RuntimeError:
             # การเชื่อมต่อถูกปิดไปแล้ว ไม่ต้องทำอะไรต่อ
+            pass
+
+
+# =============================================================================
+# WebSocket: backend push ภาพจากกล้อง IP ไปให้หน้าเว็บ (เฟส 6)
+# =============================================================================
+#
+# ต่างจาก /ws/detect ตรงทิศทางของภาพ:
+#     /ws/detect  เบราว์เซอร์ -> backend  (ภาพมาจากเว็บแคมของผู้ใช้)
+#     /ws/stream  backend -> เบราว์เซอร์  (ภาพมาจากกล้อง IP ที่ backend ต่ออยู่)
+#
+# รูปแบบข้อความที่ push ออกไป เป็น binary ก้อนเดียวที่ประกอบด้วยสองส่วน:
+#
+#     [ 4 ไบต์ ][ ..... JSON ..... ][ ..... ข้อมูล JPEG ..... ]
+#      ความยาว     ข้อมูลกำกับ            ภาพหนึ่งเฟรม
+#      ของ JSON     (tracks ฯลฯ)
+#      uint32 LE
+#
+# ที่รวมเป็นก้อนเดียวแทนที่จะส่งสองข้อความ (JSON แล้วตามด้วย binary)
+# เพราะภาพกับผลตรวจจับต้องคู่กันเสมอ ถ้าแยกส่งแล้วมีอะไรพลาดกลางทาง
+# หน้าเว็บจะเอาผลของเฟรมหนึ่งไปวาดทับภาพของอีกเฟรมหนึ่งโดยไม่มีใครรู้
+# =============================================================================
+
+STREAM_HEADER_FORMAT = "<I"
+STREAM_HEADER_SIZE = struct.calcsize(STREAM_HEADER_FORMAT)
+
+
+def _encode_stream_message(meta: dict[str, Any], jpeg: bytes) -> bytes:
+    """ประกอบข้อความ binary ก้อนเดียวจากข้อมูลกำกับและภาพ"""
+    payload = json.dumps(meta, ensure_ascii=False).encode("utf-8")
+    return struct.pack(STREAM_HEADER_FORMAT, len(payload)) + payload + jpeg
+
+
+def _encode_jpeg(image, quality: int) -> bytes | None:
+    """เข้ารหัสภาพเป็น JPEG คืน None ถ้าไม่สำเร็จ"""
+    import cv2
+
+    ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        return None
+    return buffer.tobytes()
+
+
+@app.websocket("/ws/stream")
+async def websocket_stream(websocket: WebSocket) -> None:
+    """ส่งภาพสดจากกล้อง IP พร้อมผลตรวจจับไปให้หน้าเว็บ
+
+    เลือกกล้องด้วย query string เช่น /ws/stream?camera=door_in
+    ถ้าไม่ระบุจะใช้กล้องตัวแรกที่เปิดใช้งานอยู่
+    """
+    await websocket.accept()
+
+    client = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "?"
+    sources = getattr(app.state, "frame_sources", {}) or {}
+
+    # ---- ตรวจความพร้อมก่อนเริ่มส่ง ----
+    if settings.stream.source != "rtsp":
+        await websocket.send_json({
+            "type": "error",
+            "message": (
+                f"ขณะนี้ตั้งค่า FRAME_SOURCE={settings.stream.source} "
+                "ระบบจึงรับภาพจากเบราว์เซอร์ ไม่ได้ต่อกล้อง IP "
+                "(ตั้งเป็น rtsp ในไฟล์ .env เพื่อใช้กล้อง IP)"
+            ),
+        })
+        await websocket.close(code=1011)
+        return
+
+    if not face_detector.is_loaded:
+        reason = getattr(app.state, "face_model_error", None) or "โมเดลยังไม่ถูกโหลด"
+        await websocket.send_json({"type": "error", "message": f"ระบบตรวจจับใบหน้าไม่พร้อม: {reason}"})
+        await websocket.close(code=1011)
+        return
+
+    # ---- เลือกกล้อง ----
+    requested = websocket.query_params.get("camera")
+    rtsp_sources = {k: v for k, v in sources.items() if isinstance(v, RTSPFrameSource)}
+
+    if requested:
+        source = rtsp_sources.get(requested)
+        if source is None:
+            await websocket.send_json({
+                "type": "error",
+                "message": (
+                    f"ไม่พบกล้องชื่อ {requested!r} "
+                    f"(กล้องที่เปิดใช้งานอยู่: {', '.join(rtsp_sources) or 'ไม่มีเลย'})"
+                ),
+            })
+            await websocket.close(code=1011)
+            return
+    else:
+        source = next(iter(rtsp_sources.values()), None)
+        if source is None:
+            await websocket.send_json({
+                "type": "error",
+                "message": "ไม่มีกล้องที่เปิดใช้งานอยู่เลย (ตรวจ CAMERA_IDS ในไฟล์ .env)",
+            })
+            await websocket.close(code=1011)
+            return
+
+    camera_id = source.camera.id
+    logger.info("WebSocket /ws/stream เชื่อมต่อจาก %s ดูกล้อง %s", client, camera_id)
+
+    pipeline = create_pipeline(identifier=getattr(app.state, "identifier", None))
+
+    # อัตราการส่งภาพไปหน้าเว็บ เฟส 7 จะแยกค่านี้ออกจากอัตราการตรวจจับ
+    interval = 1.0 / max(1, settings.stream.send_fps)
+    jpeg_quality = int(settings.stream.jpeg_quality * 100)
+
+    last_sent_frame_id = -1
+    last_alive = True
+
+    try:
+        while True:
+            loop_started = asyncio.get_running_loop().time()
+
+            frame = source.read()
+
+            # ---- กล้องหลุด: แจ้งหน้าเว็บทันที ไม่ปล่อยให้ภาพค้างเงียบ ๆ ----
+            alive = source.is_alive()
+            if not alive:
+                if last_alive:
+                    logger.warning("กล้อง %s ไม่ส่งภาพแล้ว แจ้งหน้าเว็บ", camera_id)
+                last_alive = False
+                await websocket.send_json({
+                    "type": "camera_status",
+                    "camera": camera_id,
+                    "alive": False,
+                    "status": source.status(),
+                })
+                # รอแล้ววนใหม่ ไม่ต้องรีบ เพราะยังไม่มีภาพให้ส่ง
+                await asyncio.sleep(0.5)
+                continue
+
+            if not last_alive:
+                logger.info("กล้อง %s กลับมาส่งภาพแล้ว", camera_id)
+                await websocket.send_json({
+                    "type": "camera_status",
+                    "camera": camera_id,
+                    "alive": True,
+                    "status": source.status(),
+                })
+            last_alive = True
+
+            if frame is None or frame.frame_id == last_sent_frame_id:
+                # ยังไม่มีเฟรมใหม่ รอสั้น ๆ แล้ววนดูใหม่
+                await asyncio.sleep(0.01)
+                continue
+
+            last_sent_frame_id = frame.frame_id
+
+            # ---- ประมวลผล (งานหนัก ต้องอยู่ใน thread แยก) ----
+            result = await asyncio.to_thread(pipeline.process, frame)
+
+            # ---- เข้ารหัสภาพ (งานหนักเช่นกัน) ----
+            jpeg = await asyncio.to_thread(_encode_jpeg, frame.image, jpeg_quality)
+            if jpeg is None:
+                logger.warning("เข้ารหัส JPEG ของกล้อง %s ไม่สำเร็จ", camera_id)
+                continue
+
+            meta = {
+                "type": "frame",
+                "camera": camera_id,
+                "frame_id": result.frame_id,
+                "tracks": tracks_to_dicts(result.tracks),
+                "detected_count": result.detected_count,
+                "source_size": list(result.source_size),
+                "detect_ms": round(result.detect_ms, 1),
+                "track_ms": round(result.track_ms, 2),
+                "identify_ms": round(result.identify_ms, 1),
+                # อายุของเฟรมตอนที่ส่งออกไป ใช้ดูว่า latency ถ่างขึ้นหรือไม่
+                "frame_age_ms": round((time.monotonic() - frame.received_at) * 1000, 1),
+            }
+
+            await websocket.send_bytes(_encode_stream_message(meta, jpeg))
+
+            # ---- คุมอัตราการส่ง ----
+            elapsed = asyncio.get_running_loop().time() - loop_started
+            if elapsed < interval:
+                await asyncio.sleep(interval - elapsed)
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket /ws/stream ตัดการเชื่อมต่อ (%s)", client)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("WebSocket /ws/stream เกิดข้อผิดพลาด: %s", exc)
+        try:
+            await websocket.close(code=1011)
+        except RuntimeError:
             pass

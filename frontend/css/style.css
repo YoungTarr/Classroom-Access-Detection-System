@@ -197,12 +197,20 @@ body {
   justify-content: center;
 }
 
-.video-box video {
+.video-box video,
+.video-box #stream-canvas {
   display: block;
   width: 100%;
   height: auto;
   /* ไม่ใช้ object-fit เพื่อไม่ให้เกิดขอบดำ (letterbox)
      เพราะขอบดำจะทำให้พิกัดที่คำนวณไว้เลื่อนไปจากความจริง */
+}
+
+/* ต้องเขียนกฎนี้ด้วยเพราะกฎด้านบนตั้ง display:block ซึ่งชนะ [hidden] ของเบราว์เซอร์
+   (ปัญหาเดียวกับ .video-box__idle) ถ้าไม่มี การสั่ง hidden จะไม่มีผล */
+.video-box video[hidden],
+.video-box #stream-canvas[hidden] {
+  display: none;
 }
 
 /* ภาพกระจกเงา - ธรรมชาติกว่าสำหรับเว็บแคม
