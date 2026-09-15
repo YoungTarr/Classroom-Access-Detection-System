@@ -141,7 +141,7 @@ class AppSettings:
     """ค่าทั่วไปของแอปพลิเคชัน"""
 
     name: str = "Classroom Access Detection System"
-    version: str = "0.3.0"  # เฟส 3: ติดตามใบหน้าข้ามเฟรม + กรอบขยับลื่น
+    version: str = "0.4.0"  # เฟส 4: จดจำว่าเป็นใคร (FAISS + ชื่อจากฐานข้อมูล)
     log_level: str = "INFO"
     timezone: str = "Asia/Bangkok"
 
@@ -175,10 +175,51 @@ class FaceSettings:
     # 0 = ปล่อยให้ onnxruntime ตัดสินใจเอง (Pi 5 มี 4 core ลองตั้ง 3 ไว้เผื่อ core ให้งานอื่น)
     num_threads: int
 
+    # ชุดโมเดลที่ใช้ "จดจำ" ใบหน้า แยกจากชุดที่ใช้ "ตรวจจับ" โดยตั้งใจ
+    # วัดจริงแล้ว w600k_r50 (buffalo_l) ใช้ ~167 ms ต่อหนึ่งใบหน้า ซึ่งหนักเกินไป
+    # ส่วน w600k_mbf (buffalo_s) ใช้ ~12 ms เร็วกว่า 14 เท่า และแยกคนได้ดีพอ ๆ กัน
+    rec_pack: str
+
     @property
     def model_path(self) -> Path:
-        """path เต็มของโฟลเดอร์ชุดโมเดลที่จะโหลด"""
+        """path เต็มของโฟลเดอร์ชุดโมเดลตรวจจับที่จะโหลด"""
         return self.models_dir / self.model_pack
+
+    @property
+    def rec_model_path(self) -> Path:
+        """path เต็มของโฟลเดอร์ชุดโมเดลจดจำใบหน้า"""
+        return self.models_dir / self.rec_pack
+
+
+@dataclass(frozen=True)
+class IdentifySettings:
+    """ค่าของการระบุตัวตน (เฟส 4)"""
+
+    # วิธีที่ใช้ระบุตัวตน ตอนนี้มีแค่ "face"
+    # อนาคตอาจเพิ่ม rfid / qr โดยไม่ต้องแก้ pipeline
+    mode: str
+
+    # คะแนน cosine similarity ขั้นต่ำที่จะถือว่า "ใช่คนนี้"
+    # ทดสอบแล้วพบว่าคนต่างกันได้คะแนนสูงสุดราว 0.17 จึงเว้นระยะห่างไว้มากพอ
+    # สูงไป = คนในระบบก็จำไม่ได้ (ขึ้น Unknown), ต่ำไป = จำสลับคน
+    similarity_threshold: float
+
+    # จำนวนใบหน้าสูงสุดที่จะส่งเข้าโมเดลจดจำต่อหนึ่งเฟรม
+    # เป็นเพดานกันกรณีคนเยอะผิดปกติจนเฟรมหนึ่งใช้เวลานานเกินไป
+    # ใบหน้าที่เกินเพดานจะถูกจัดคิวไปทำในเฟรมถัดไป (ไม่ได้ถูกทิ้ง)
+    max_faces_per_frame: int
+
+    # จำนวนผลย้อนหลังที่เก็บไว้โหวตต่อหนึ่ง track
+    # นี่คือส่วนที่กันชื่อกะพริบ: ไม่เชื่อผลเฟรมเดียว แต่ดูว่าหลายเฟรมที่ผ่านมาบอกว่าใคร
+    vote_window: int
+
+    # ต้องได้เสียงข้างมากอย่างน้อยกี่เสียงจึงจะกล้าแสดงชื่อ
+    # ตั้งต่ำไป = ชื่อขึ้นเร็วแต่ผิดง่าย, สูงไป = กว่าจะขึ้นชื่อต้องรอนาน
+    min_votes: int
+
+    # track ที่ได้ผลชัดเจนแล้ว จะตรวจซ้ำทุกกี่เฟรม
+    # ไม่ตรวจทุกเฟรมเพื่อประหยัดแรงเครื่อง แต่ยังตรวจเป็นระยะเผื่อจับคนผิดตั้งแต่แรก
+    recheck_interval: int
 
 
 @dataclass(frozen=True)
@@ -250,10 +291,14 @@ class Settings:
     face: FaceSettings
     stream: StreamSettings
     tracking: TrackingSettings
+    identify: IdentifySettings
 
 
 # แหล่งภาพที่ระบบรองรับ - ใส่ค่านอกเหนือจากนี้ต้องฟ้อง ไม่ใช่เงียบ ๆ แล้วใช้ค่า default
 VALID_FRAME_SOURCES = ("browser", "rtsp")
+
+# วิธีระบุตัวตนที่ระบบรองรับ (อนาคตอาจเพิ่ม rfid / qr)
+VALID_IDENTIFIERS = ("face",)
 
 
 def load_settings() -> Settings:
@@ -263,6 +308,13 @@ def load_settings() -> Settings:
         raise ConfigError(
             f"ค่า FRAME_SOURCE ไม่ถูกต้อง: {frame_source!r} "
             f"(รองรับเฉพาะ {' หรือ '.join(VALID_FRAME_SOURCES)})"
+        )
+
+    identifier_mode = _get_str("IDENTIFIER", "face").lower()
+    if identifier_mode not in VALID_IDENTIFIERS:
+        raise ConfigError(
+            f"ค่า IDENTIFIER ไม่ถูกต้อง: {identifier_mode!r} "
+            f"(รองรับเฉพาะ {' หรือ '.join(VALID_IDENTIFIERS)})"
         )
 
     return Settings(
@@ -287,6 +339,15 @@ def load_settings() -> Settings:
             det_size=_get_int("FACE_DET_SIZE", 640),
             det_thresh=_get_float("FACE_DET_THRESH", 0.5),
             num_threads=_get_int("FACE_NUM_THREADS", 0),
+            rec_pack=_get_str("FACE_REC_PACK", "buffalo_s"),
+        ),
+        identify=IdentifySettings(
+            mode=identifier_mode,
+            similarity_threshold=_get_float("SIMILARITY_THRESHOLD", 0.35),
+            max_faces_per_frame=_get_int("IDENTIFY_MAX_FACES_PER_FRAME", 4),
+            vote_window=_get_int("IDENTITY_VOTE_WINDOW", 7),
+            min_votes=_get_int("IDENTITY_MIN_VOTES", 3),
+            recheck_interval=_get_int("IDENTITY_RECHECK_INTERVAL", 15),
         ),
         stream=StreamSettings(
             source=frame_source,

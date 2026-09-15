@@ -359,6 +359,26 @@ body {
   color: #ffb3b3;
 }
 
+.alert--warn {
+  background: rgba(255, 176, 32, 0.1);
+  border: 1px solid rgba(255, 176, 32, 0.35);
+  color: #ffd489;
+}
+
+.alert--ok {
+  background: rgba(62, 207, 142, 0.1);
+  border: 1px solid rgba(62, 207, 142, 0.35);
+  color: #9bebc7;
+}
+
+/* กลุ่มปุ่ม/ป้ายที่มุมขวาของหัวการ์ด */
+.card__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 /* ---------------------------------------------------------------------------
    ตารางรายชื่อ
    --------------------------------------------------------------------------- */

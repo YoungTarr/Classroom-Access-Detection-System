@@ -80,6 +80,10 @@
           <span class="stat__value" id="stat-tracks">—</span>
         </div>
         <div class="stat">
+          <span class="stat__label">จดจำได้</span>
+          <span class="stat__value" id="stat-known">—</span>
+        </div>
+        <div class="stat">
           <span class="stat__label">อัตราวาดกรอบ</span>
           <span class="stat__value" id="stat-render-fps">—</span>
         </div>
@@ -126,6 +130,10 @@
           <dd id="health-face-model">—</dd>
         </div>
         <div class="detail__row">
+          <dt>คลังใบหน้า</dt>
+          <dd id="health-identify">—</dd>
+        </div>
+        <div class="detail__row">
           <dt>แหล่งภาพ</dt>
           <dd id="health-frame-source">—</dd>
         </div>
@@ -145,8 +153,16 @@
     <section class="card">
       <div class="card__header">
         <h2>รายชื่อสมาชิก</h2>
-        <span class="badge" id="member-count">—</span>
+        <div class="card__actions">
+          <span class="badge" id="member-count">—</span>
+          <!-- สร้างคลังเวกเตอร์ใบหน้าใหม่ หลังเพิ่มรูปหรือแก้ข้อมูลสมาชิก
+               ไม่ต้องรีสตาร์ท container -->
+          <button type="button" class="btn" id="btn-reload-faces">โหลดรูปใบหน้าใหม่</button>
+        </div>
       </div>
+
+      <!-- ผลการสร้างคลังใบหน้า แสดงหลังกดปุ่มด้านบน -->
+      <div class="alert" id="reload-result" hidden></div>
 
       <div class="table-wrap">
         <table class="table" id="member-table">

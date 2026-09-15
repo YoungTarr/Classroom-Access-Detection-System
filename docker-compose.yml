@@ -71,9 +71,10 @@ services:
       context: ./backend
       args:
         # ชุดโมเดลที่จะโหลดฝังไว้ใน image ตอน build
-        # ต้องตรงกับ FACE_MODEL_PACK ใน .env ไม่งั้น backend จะฟ้องตอนสตาร์ท
+        # ต้องตรงกับค่าใน .env ไม่งั้น backend จะฟ้องตอนสตาร์ท
         # (โหลดตอน build เพราะข้อกำหนดคือห้ามดาวน์โหลดโมเดลตอน runtime)
         FACE_MODEL_PACK: ${FACE_MODEL_PACK:-buffalo_l}
+        FACE_REC_PACK: ${FACE_REC_PACK:-buffalo_s}
     container_name: cads-backend
     restart: unless-stopped
     env_file:

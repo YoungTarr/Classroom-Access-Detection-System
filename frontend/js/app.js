@@ -34,8 +34,18 @@ const CONFIG_FALLBACK = {
   tracking: { smoothing: 0.35, max_missing: 3 },
 };
 
-// สีที่ใช้วาดกรอบ (เฟส 4 จะเพิ่มสีเขียว/แดงตามผลการจดจำ)
-const BOX_COLOR = '#4c8dff';
+/* สีกรอบตามผลการจดจำ (เฟส 4)
+   เขียว = รู้ว่าเป็นใคร / แดง = ไม่ใช่คนในระบบ / น้ำเงิน = กำลังตรวจสอบอยู่
+
+   ที่ต้องมีสีน้ำเงินด้วย เพราะ "ยังตรวจไม่เสร็จ" กับ "ตรวจแล้วไม่รู้จัก"
+   เป็นคนละเรื่องกัน ถ้าใช้สีแดงทั้งคู่ ทุกคนที่เดินเข้ามาจะเห็นกรอบแดง
+   แวบหนึ่งก่อนเปลี่ยนเป็นเขียวเสมอ ซึ่งสะดุดตาและทำให้เข้าใจผิด */
+const BOX_COLORS = {
+  recognized: '#3ecf8e',
+  unknown: '#ff5c5c',
+  pending: '#4c8dff',
+};
+
 const BOX_LINE_WIDTH = 3;
 
 // จำนวนเฟรมที่ต้องเจอติดกันก่อนจะเริ่มวาดกรอบ
@@ -70,6 +80,7 @@ const el = {
   statProcess: byId('stat-process'),
   statFaces: byId('stat-faces'),
   statTracks: byId('stat-tracks'),
+  statKnown: byId('stat-known'),
   statRenderFps: byId('stat-render-fps'),
   statDropped: byId('stat-dropped'),
 
@@ -82,7 +93,10 @@ const el = {
   dbTarget: byId('health-db-target'),
   dbCount: byId('health-db-count'),
   faceModel: byId('health-face-model'),
+  identifyInfo: byId('health-identify'),
   frameSource: byId('health-frame-source'),
+  btnReloadFaces: byId('btn-reload-faces'),
+  reloadResult: byId('reload-result'),
   serverTime: byId('health-server-time'),
   healthError: byId('health-error'),
 
@@ -355,15 +369,18 @@ function startDetection() {
 
     const tracks = data.tracks || [];
     const visibleCount = tracks.filter((t) => t.visible).length;
+    const knownCount = tracks.filter((t) => t.identity_state === 'recognized').length;
 
-    // แสดงเวลาแยกเป็น ตรวจจับ / ติดตาม จะได้รู้ว่าเวลาหมดไปกับขั้นไหน
+    // แสดงเวลาแยกตามขั้น จะได้รู้ว่าเวลาหมดไปกับอะไร
     const timing = (data.detect_ms !== undefined)
-      ? (data.process_ms + ' ms (ตรวจ ' + data.detect_ms + ' + ติดตาม ' + data.track_ms + ')')
+      ? (data.process_ms + ' ms (ตรวจ ' + data.detect_ms +
+         ' + จดจำ ' + (data.identify_ms !== undefined ? data.identify_ms : 0) + ')')
       : (data.process_ms + ' ms');
     setText(el.statProcess, data.process_ms !== undefined ? timing : null);
 
     setText(el.statFaces, (data.detected_count !== undefined ? data.detected_count : visibleCount) + ' คน');
     setText(el.statTracks, tracks.length + ' track');
+    setText(el.statKnown, knownCount + ' / ' + tracks.length + ' คน');
     setText(el.statSentSize, data.source_size ? data.source_size[0] + ' × ' + data.source_size[1] : null);
 
     // ป้อนผลใหม่ให้ตัววาด แต่ไม่วาดตรงนี้ - ปล่อยให้วงวาดของจอเป็นคนวาด
@@ -630,6 +647,8 @@ function updateRenderTargets(tracks) {
         hits: t.hits,
         visible: t.visible,
         missing: t.missing,
+        identityState: t.identity_state || 'pending',
+        identity: t.identity || null,
         alpha: 0,          // เริ่มจากโปร่งใสแล้วค่อย ๆ ชัดขึ้น
         targetAlpha: 1,
       };
@@ -640,6 +659,8 @@ function updateRenderTargets(tracks) {
       entry.hits = t.hits;
       entry.visible = t.visible;
       entry.missing = t.missing;
+      entry.identityState = t.identity_state || 'pending';
+      entry.identity = t.identity || null;
     }
 
     // กรอบที่ backend ค้างไว้ (หาใบหน้าไม่เจอชั่วคราว) ให้วาดจาง ๆ
@@ -718,6 +739,29 @@ function renderTick(now) {
   drawBoxes();
 }
 
+/**
+ * ประกอบข้อความบนป้ายกำกับจากผลการจดจำ
+ *
+ * ชื่อ-นามสกุลมาจากฐานข้อมูลผ่าน backend เสมอ ที่นี่แค่เอามาต่อกัน
+ * ห้ามมีชื่อคนเขียนตายตัวอยู่ในไฟล์นี้เด็ดขาด
+ */
+function buildLabel(entry) {
+  const ident = entry.identity;
+
+  if (entry.identityState === 'recognized' && ident) {
+    const name = [ident.first_name, ident.last_name].filter(Boolean).join(' ');
+    const percent = Math.round((ident.confidence || 0) * 100);
+    return ident.student_id + '  ' + name + '  ' + percent + '%';
+  }
+
+  if (entry.identityState === 'unknown') {
+    return 'Unknown';
+  }
+
+  // pending: กำลังรวบรวมผลโหวตอยู่
+  return 'กำลังตรวจสอบ…';
+}
+
 /** วาดกรอบทั้งหมดตามตำแหน่งที่ไหลมาถึงตอนนี้ */
 function drawBoxes() {
   const ctx = el.overlay.getContext('2d');
@@ -729,11 +773,11 @@ function drawBoxes() {
   const mirrored = Boolean(config.stream.mirror);
 
   ctx.lineWidth = BOX_LINE_WIDTH;
-  ctx.font = '600 13px "Sarabun", "Segoe UI", sans-serif';
+  ctx.font = '600 14px "Sarabun", "Segoe UI", sans-serif';
   ctx.textBaseline = 'top';
   ctx.lineJoin = 'round';
 
-  render.boxes.forEach((entry, trackId) => {
+  render.boxes.forEach((entry) => {
     if (entry.alpha < 0.02) return;
 
     const c = entry.current;
@@ -749,26 +793,38 @@ function drawBoxes() {
       x = tf.displayWidth - (x + w);
     }
 
-    ctx.globalAlpha = entry.alpha;
+    const color = BOX_COLORS[entry.identityState] || BOX_COLORS.pending;
 
-    ctx.strokeStyle = BOX_COLOR;
+    ctx.globalAlpha = entry.alpha;
+    ctx.strokeStyle = color;
     ctx.strokeRect(x, y, w, h);
 
-    // ป้ายกำกับ: หมายเลข track + คะแนน (เฟส 4 จะเปลี่ยนเป็นชื่อคน)
-    const label = '#' + trackId + '  ' + (entry.score * 100).toFixed(0) + '%';
+    // ---- ป้ายกำกับ ----
+    const label = buildLabel(entry);
+    const padding = 7;
+    const labelHeight = 23;
     const textWidth = ctx.measureText(label).width;
-    const padding = 5;
-    const labelHeight = 20;
+    const labelWidth = textWidth + padding * 2;
 
     // ถ้าป้ายล้นขอบบนของภาพ ให้ย้ายไปไว้ใต้กรอบแทน
-    const labelY = (y - labelHeight - 2 < 0) ? (y + h + 2) : (y - labelHeight - 2);
+    let labelY = y - labelHeight - 2;
+    if (labelY < 0) {
+      labelY = y + h + 2;
+    }
+
+    // ถ้าป้ายยาวจนล้นขอบขวา ให้ดันกลับเข้ามาให้อ่านครบ
+    // (ชื่อไทยเต็ม ๆ กับรหัสนักศึกษารวมกันยาวกว่ากรอบใบหน้าเสมอ)
+    let labelX = x;
+    if (labelX + labelWidth > tf.displayWidth) {
+      labelX = Math.max(0, tf.displayWidth - labelWidth);
+    }
 
     // พื้นหลังทึบรองข้อความ เพื่อให้อ่านออกแม้ฉากหลังสว่าง
-    ctx.fillStyle = BOX_COLOR;
-    ctx.fillRect(x, labelY, textWidth + padding * 2, labelHeight);
+    ctx.fillStyle = color;
+    ctx.fillRect(labelX, labelY, labelWidth, labelHeight);
 
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(label, x + padding, labelY + 3);
+    ctx.fillStyle = '#0f1420';  // ตัวอักษรสีเข้มบนพื้นสีสด อ่านง่ายกว่าสีขาว
+    ctx.fillText(label, labelX + padding, labelY + 4);
   });
 
   ctx.globalAlpha = 1;
@@ -831,15 +887,41 @@ async function loadHealth() {
     const face = data.face || {};
     setText(
       el.faceModel,
-      face.loaded ? (face.model_pack + ' (det ' + face.det_size + ')') : 'ยังไม่ได้โหลด'
+      face.loaded
+        ? (face.model_pack + ' (det ' + face.det_size + ') + ' + (face.recognition_model || '—'))
+        : 'ยังไม่ได้โหลด'
     );
+
+    // สรุปสถานะคลังใบหน้า พร้อมเตือนถ้ามีคนที่ระบบจะจำไม่ได้
+    const idn = data.identify || {};
+    if (idn.ready) {
+      let text = idn.vector_count + ' เวกเตอร์ จาก ' + idn.enrolled_count + '/' + idn.member_count + ' คน';
+      if (idn.problem_count) text += '  (มีปัญหา ' + idn.problem_count + ' ไฟล์)';
+      setText(el.identifyInfo, text);
+    } else {
+      setText(el.identifyInfo, idn.error ? ('ใช้ไม่ได้: ' + idn.error) : 'ยังไม่มีรูปใบหน้าในระบบ');
+    }
 
     const src = data.frame_source || {};
     setText(el.frameSource, src.type ? (src.type + (src.alive ? ' (พร้อม)' : ' (ไม่พร้อม)')) : null);
 
+    // คลังใบหน้าว่างไม่ถือว่าระบบพัง (ตรวจจับ/ติดตามยังทำงานได้)
+    // แต่ต้องเตือนให้เห็นชัด ไม่งั้นผู้ใช้จะงงว่าทำไมทุกคนขึ้น Unknown
+    const faceLibraryEmpty = idn.ready === false && !idn.error;
+
     if (data.status === 'ok') {
-      setStatus('ok', 'ระบบพร้อมใช้งาน');
-      showAlert(el.healthError, null);
+      if (faceLibraryEmpty) {
+        setStatus('pending', 'ระบบพร้อม แต่ยังไม่มีรูปใบหน้าให้เทียบ');
+        showAlert(
+          el.healthError,
+          'ยังไม่มีเวกเตอร์ใบหน้าในระบบ ทุกคนจะขึ้นเป็น Unknown\n\n' +
+          'วิธีแก้: วางไฟล์รูปไว้ที่ data/faces/<รหัสนักศึกษา>/left.jpg, front.jpg, right.jpg ' +
+          'แล้วกดปุ่ม "โหลดรูปใบหน้าใหม่" ด้านล่าง'
+        );
+      } else {
+        setStatus('ok', 'ระบบพร้อมใช้งาน');
+        showAlert(el.healthError, null);
+      }
       return true;
     }
 
@@ -850,6 +932,9 @@ async function loadHealth() {
     }
     if (!face.loaded) {
       problems.push('โมเดลใบหน้า: ' + (face.error || 'ยังไม่ได้โหลด'));
+    }
+    if (idn.error) {
+      problems.push('การระบุตัวตน: ' + idn.error);
     }
 
     setStatus('error', 'ระบบทำงานได้ไม่ครบ');
@@ -968,6 +1053,57 @@ async function refreshAll() {
 }
 
 el.btnRefresh.addEventListener('click', refreshAll);
+
+/**
+ * สร้างคลังเวกเตอร์ใบหน้าใหม่ โดยไม่ต้องรีสตาร์ท container
+ * ใช้หลังเพิ่มรูปลงใน data/faces/ หรือแก้ข้อมูลสมาชิกในฐานข้อมูล
+ */
+async function reloadFaces() {
+  el.btnReloadFaces.disabled = true;
+  el.btnReloadFaces.textContent = 'กำลังอ่านรูป…';
+  showAlert(el.reloadResult, null);
+
+  try {
+    const res = await fetch('/api/faces/reload', { cache: 'no-store' });
+    const data = await res.json();
+
+    if (data.status !== 'ok') {
+      el.reloadResult.className = 'alert alert--error';
+      showAlert(el.reloadResult, 'สร้างคลังใหม่ไม่สำเร็จ: ' + (data.message || 'ไม่ทราบสาเหตุ'));
+      return;
+    }
+
+    const report = data.report || {};
+    let text = data.message + '  (ใช้เวลา ' + report.build_ms + ' ms)';
+
+    // รายงานปัญหาให้ครบทุกไฟล์ ไม่สรุปรวมว่า "มีบางไฟล์ใช้ไม่ได้"
+    // เพราะผู้ใช้ต้องรู้ว่าต้องไปแก้ไฟล์ไหนของใคร
+    if (report.members_without_vectors && report.members_without_vectors.length) {
+      text += '\n\nคนที่ระบบจะจำไม่ได้ (ไม่มีรูปที่ใช้ได้เลย):\n  • ' +
+        report.members_without_vectors.join('\n  • ');
+    }
+    if (report.problems && report.problems.length) {
+      text += '\n\nไฟล์ที่มีปัญหา:\n  • ' + report.problems.join('\n  • ');
+    }
+
+    const hasProblem = (report.problems && report.problems.length) ||
+                       (report.members_without_vectors && report.members_without_vectors.length);
+    el.reloadResult.className = hasProblem ? 'alert alert--warn' : 'alert alert--ok';
+    showAlert(el.reloadResult, text);
+
+    // อัปเดตสถานะด้านบนให้ตรงกับคลังใหม่ทันที
+    await loadHealth();
+
+  } catch (err) {
+    el.reloadResult.className = 'alert alert--error';
+    showAlert(el.reloadResult, 'เรียก /api/faces/reload ไม่สำเร็จ: ' + err.message);
+  } finally {
+    el.btnReloadFaces.disabled = false;
+    el.btnReloadFaces.textContent = 'โหลดรูปใบหน้าใหม่';
+  }
+}
+
+el.btnReloadFaces.addEventListener('click', reloadFaces);
 
 // ปิดกล้องให้เรียบร้อยเมื่อออกจากหน้า ไม่ปล่อยให้ไฟกล้องค้าง
 window.addEventListener('beforeunload', () => {

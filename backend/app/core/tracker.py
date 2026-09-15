@@ -25,6 +25,7 @@ from typing import Iterable
 
 from app.config import settings
 from app.face.detector import DetectedFace
+from app.identify.base import IdentityResult
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +98,110 @@ class Track:
     # ประวัติจุดกึ่งกลางย้อนหลัง (เฟส 5 จะใช้คำนวณทิศทางการเคลื่อนที่)
     history: deque = field(default_factory=lambda: deque(maxlen=15))
 
+    # ------------------------------------------------------------------
+    # ส่วนของการระบุตัวตน (เฟส 4)
+    # ------------------------------------------------------------------
+
+    # ผลการระบุตัวตนย้อนหลัง เก็บเป็นรหัสนักศึกษา หรือ None เมื่อระบุไม่ได้
+    # นี่คือหัวใจของการกันชื่อกะพริบ: เราไม่เชื่อผลของเฟรมเดียว
+    identity_votes: deque = field(default_factory=lambda: deque(maxlen=7))
+
+    # ผลดิบล่าสุด (ไว้ debug และเอาคะแนนมาแสดง)
+    last_identity: IdentityResult | None = None
+
+    # ผลที่ "ตัดสินแล้ว" จากการโหวต - อันนี้คือสิ่งที่ส่งไปแสดงบนหน้าจอ
+    decided_identity: IdentityResult | None = None
+
+    # เฟรมที่ระบุตัวตนครั้งล่าสุด ใช้คุมว่าจะตรวจซ้ำเมื่อไร
+    frames_since_identify: int = 999
+
     @property
     def is_visible(self) -> bool:
         """เจอในเฟรมล่าสุดหรือไม่ (ไม่ใช่กรอบที่ค้างไว้)"""
         return self.missing == 0
+
+    @property
+    def needs_identify(self) -> bool:
+        """ควรส่งใบหน้านี้เข้าโมเดลจดจำในเฟรมนี้หรือไม่
+
+        ลำดับความสำคัญ:
+            1. ยังโหวตไม่ครบ -> ต้องรีบเก็บผลให้ครบเพื่อจะได้ขึ้นชื่อเร็ว ๆ
+            2. โหวตครบแล้ว   -> ตรวจซ้ำเป็นระยะ เผื่อรอบแรกจับผิดคน
+        """
+        cfg = settings.identify
+
+        if len(self.identity_votes) < cfg.vote_window:
+            return True
+
+        return self.frames_since_identify >= cfg.recheck_interval
+
+    def record_identity(self, result: IdentityResult) -> None:
+        """บันทึกผลการระบุตัวตนหนึ่งครั้ง แล้วคำนวณผลที่ตัดสินใหม่"""
+        self.last_identity = result
+        self.frames_since_identify = 0
+
+        # เก็บเป็น student_id (หรือ None) ไม่ใช่เก็บทั้ง object
+        # เพราะการโหวตสนใจแค่ "เป็นใคร" ไม่ได้สนคะแนนของแต่ละครั้ง
+        self.identity_votes.append(result.student_id if result.is_recognized else None)
+
+        self._recompute_decision(result)
+
+    def _recompute_decision(self, latest: IdentityResult) -> None:
+        """ตัดสินว่าจะแสดงชื่อใครจากเสียงข้างมากย้อนหลัง
+
+        ทำไมต้องโหวตแทนที่จะเชื่อผลล่าสุด:
+            โมเดลจะพลาดเป็นครั้งคราวเมื่อหน้าเอียง แสงแวบ หรือภาพเบลอ
+            ถ้าเชื่อผลเฟรมเดียว ชื่อบนจอจะกะพริบสลับไปมาจนอ่านไม่ได้
+            และเมื่อคนสองคนยืนติดกัน โอกาสสลับชื่อกันจะสูงมาก
+            การดูย้อนหลังหลายเฟรมทำให้ผลที่พลาดเป็นครั้งคราวถูกกลบไป
+        """
+        cfg = settings.identify
+
+        if not self.identity_votes:
+            self.decided_identity = None
+            return
+
+        # นับคะแนนเฉพาะผลที่ระบุได้ ไม่นับ None
+        counts: dict[str, int] = {}
+        for student_id in self.identity_votes:
+            if student_id is not None:
+                counts[student_id] = counts.get(student_id, 0) + 1
+
+        if not counts:
+            # ทุกครั้งที่ตรวจล้วนระบุไม่ได้ = ไม่ใช่คนในระบบจริง ๆ
+            self.decided_identity = latest if not latest.is_recognized else None
+            return
+
+        winner_id, winner_votes = max(counts.items(), key=lambda kv: kv[1])
+
+        if winner_votes < cfg.min_votes:
+            # เสียงยังไม่พอ ยังไม่กล้าขึ้นชื่อ - ระหว่างนี้แสดงเป็น Unknown ไปก่อน
+            # ดีกว่าขึ้นชื่อผิดแล้วค่อยเปลี่ยน ซึ่งสะดุดตากว่ามาก
+            self.decided_identity = IdentityResult.unknown(
+                identified_by=latest.identified_by,
+                confidence=latest.confidence,
+                detail=(
+                    f"กำลังรวบรวมผล ({winner_votes}/{cfg.min_votes} เสียง "
+                    f"จาก {len(self.identity_votes)} ครั้งที่ตรวจ)"
+                ),
+            )
+            return
+
+        # ถ้าผลล่าสุดตรงกับผู้ชนะ ใช้ผลล่าสุดเลยเพราะมีคะแนนและรายละเอียดที่สดใหม่
+        if latest.is_recognized and latest.student_id == winner_id:
+            self.decided_identity = latest
+            return
+
+        # ผลล่าสุดไม่ตรงกับเสียงข้างมาก (พลาดชั่วคราว) ให้ยึดผลเดิมที่ตัดสินไว้แล้ว
+        if (
+            self.decided_identity is not None
+            and self.decided_identity.is_recognized
+            and self.decided_identity.student_id == winner_id
+        ):
+            return
+
+        # ยังไม่เคยมีผลของผู้ชนะเก็บไว้ ให้รอผลครั้งถัดไปที่ตรงกัน
+        # (เกิดได้ตอนเพิ่งเปลี่ยนผู้ชนะ) ระหว่างนี้ยังไม่เปลี่ยนสิ่งที่แสดงอยู่
 
     def update(self, face: DetectedFace) -> None:
         """อัปเดตด้วยผลตรวจจับใหม่ที่จับคู่กันได้"""
@@ -110,15 +211,18 @@ class Track:
         self.missing = 0
         self.last_seen_at = time.monotonic()
         self.history.append(center_of(self.bbox))
+        self.frames_since_identify += 1
 
     def mark_missing(self) -> None:
         """เฟรมนี้หาไม่เจอ - ยังไม่ลบ แค่นับไว้"""
         self.missing += 1
+        self.frames_since_identify += 1
 
     def as_dict(self) -> dict:
         """แปลงเป็นรูปแบบที่ส่งกลับไปให้เบราว์เซอร์"""
         x, y, w, h = self.bbox
-        return {
+
+        data = {
             "track_id": self.track_id,
             "bbox": [x, y, w, h],
             "score": round(float(self.score), 4),
@@ -127,6 +231,37 @@ class Track:
             "missing": self.missing,
             "hits": self.hits,
         }
+
+        # ผลที่ผ่านการโหวตแล้วเท่านั้นที่ส่งไปแสดง ไม่ใช่ผลดิบของเฟรมล่าสุด
+        data["identity_state"] = self.identity_state
+
+        if self.decided_identity is not None:
+            data["identity"] = self.decided_identity.as_dict()
+            data["identity"]["votes"] = len(self.identity_votes)
+
+        return data
+
+    @property
+    def identity_state(self) -> str:
+        """สถานะการระบุตัวตนสำหรับหน้าเว็บ: pending / recognized / unknown
+
+        แยก "pending" ออกมาจาก "unknown" โดยตั้งใจ เพราะสองอย่างนี้ต่างกันมาก
+            pending  = ยังตรวจไม่พอที่จะตัดสิน (เพิ่งเดินเข้ามาในเฟรม)
+            unknown  = ตรวจพอแล้วและสรุปว่าไม่ใช่คนในระบบ
+        ถ้าไม่แยก หน้าเว็บจะขึ้นกรอบแดง "Unknown" แวบหนึ่งก่อนเปลี่ยนเป็นชื่อเสมอ
+        ซึ่งสะดุดตาและทำให้เข้าใจผิดว่าระบบจำคนไม่ได้
+        """
+        if self.decided_identity is None:
+            return "pending"
+
+        if self.decided_identity.is_recognized:
+            return "recognized"
+
+        # ตัดสินว่าไม่รู้จักแล้ว แต่ถ้ายังตรวจไม่ครบรอบก็ยังถือว่ากำลังรวบรวมอยู่
+        if len(self.identity_votes) < settings.identify.min_votes:
+            return "pending"
+
+        return "unknown"
 
 
 class FaceTracker:
@@ -202,6 +337,7 @@ class FaceTracker:
             bbox=bbox,
             score=face.score,
             history=deque(maxlen=self.history_size),
+            identity_votes=deque(maxlen=settings.identify.vote_window),
         )
         track.history.append(center_of(bbox))
 

@@ -30,6 +30,8 @@ from app.core.pipeline import create_pipeline
 from app.core.tracker import tracks_to_dicts
 from app.db.database import database
 from app.face.detector import FaceModelError, face_detector
+from app.face.recognizer import face_recognizer
+from app.identify import IdentifierCreationError, create_identifier
 
 # -----------------------------------------------------------------------------
 # ตั้งค่า log ให้ออกทาง stdout เพื่อให้เห็นผ่าน docker compose logs
@@ -90,9 +92,32 @@ async def lifespan(_: FastAPI):
     try:
         # to_thread เพราะการโหลดโมเดลใช้เวลาหลายวินาทีและเป็นงาน blocking
         await asyncio.to_thread(face_detector.load)
+        await asyncio.to_thread(face_recognizer.load)
     except FaceModelError as exc:
         app.state.face_model_error = str(exc)
         logger.error("โหลดโมเดลใบหน้าไม่สำเร็จ:\n%s", exc)
+
+    # ---- สร้างตัวระบุตัวตนและคลังเวกเตอร์ใบหน้า ----
+    # ใช้ตัวเดียวร่วมกันทุกการเชื่อมต่อ เพราะคลังเวกเตอร์เป็นข้อมูลอ่านอย่างเดียว
+    # (ส่วนที่เป็นสถานะคือผลโหวต ซึ่งเก็บอยู่ใน track ของแต่ละ pipeline)
+    app.state.identifier = None
+    app.state.identifier_error = None
+
+    if app.state.face_model_error is None:
+        try:
+            identifier = create_identifier()
+            # สร้างคลังตั้งแต่สตาร์ท จะได้เห็นปัญหาเรื่องไฟล์รูปทันทีใน log
+            # ไม่ใช่ไปเจอตอนมีคนเดินผ่านกล้องแล้วขึ้น Unknown โดยไม่รู้สาเหตุ
+            await asyncio.to_thread(identifier.reload)
+            app.state.identifier = identifier
+        except IdentifierCreationError as exc:
+            app.state.identifier_error = str(exc)
+            logger.error("สร้างตัวระบุตัวตนไม่สำเร็จ: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            app.state.identifier_error = f"สร้างคลังใบหน้าไม่สำเร็จ: {exc}"
+            logger.exception("สร้างคลังใบหน้าไม่สำเร็จ")
+    else:
+        app.state.identifier_error = "ข้ามการสร้างคลังใบหน้า เพราะโหลดโมเดลไม่สำเร็จ"
 
     # ---- เตรียมแหล่งภาพ ----
     app.state.frame_source = create_frame_source(settings.stream.source)
@@ -149,6 +174,19 @@ def health(response: Response) -> dict[str, Any]:
 
     face_status = face_detector.status()
     face_status["error"] = getattr(app.state, "face_model_error", None)
+    face_status["recognition_model"] = face_recognizer.model_name
+    face_status["recognition_loaded"] = face_recognizer.is_loaded
+
+    identifier = getattr(app.state, "identifier", None)
+    if identifier is not None:
+        identify_status = identifier.status()
+        identify_status["error"] = None
+    else:
+        identify_status = {
+            "mode": settings.identify.mode,
+            "ready": False,
+            "error": getattr(app.state, "identifier_error", None) or "ยังไม่ได้สร้าง",
+        }
 
     frame_source = getattr(app.state, "frame_source", None)
     source_status: dict[str, Any] = {
@@ -159,8 +197,13 @@ def health(response: Response) -> dict[str, Any]:
         source_status["received_frames"] = frame_source.received_count
 
     db_ok = db_health.connected and db_health.error is None
-    face_ok = face_status["loaded"]
-    ok = db_ok and face_ok
+    face_ok = face_status["loaded"] and face_status["recognition_loaded"]
+
+    # หมายเหตุ: คลังใบหน้าว่าง (ยังไม่มีรูป) ไม่ถือว่าระบบพัง
+    # ระบบยังตรวจจับและติดตามได้ปกติ แค่จะขึ้น Unknown กับทุกคน
+    # จึงนับว่า degraded เฉพาะเมื่อ "สร้างตัวระบุตัวตนไม่ได้เลย" เท่านั้น
+    identify_ok = identifier is not None
+    ok = db_ok and face_ok and identify_ok
 
     if not ok:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -170,7 +213,7 @@ def health(response: Response) -> dict[str, Any]:
         "app": {
             "name": settings.app.name,
             "version": settings.app.version,
-            "phase": 3,
+            "phase": 4,
         },
         "database": {
             "connected": db_health.connected,
@@ -180,8 +223,52 @@ def health(response: Response) -> dict[str, Any]:
             "error": db_health.error,
         },
         "face": face_status,
+        "identify": identify_status,
         "frame_source": source_status,
         "server_time": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+@app.get("/api/faces/reload", tags=["สมาชิก"])
+async def reload_faces(response: Response) -> dict[str, Any]:
+    """สร้างคลังเวกเตอร์ใบหน้าใหม่ โดยไม่ต้องรีสตาร์ท container
+
+    ใช้เมื่อ
+        - เพิ่มรูปใหม่ลงใน data/faces/
+        - เพิ่ม/แก้/ลบสมาชิกในฐานข้อมูล
+        - แก้ไฟล์รูปที่เคยมีปัญหาแล้วอยากให้ลองใหม่
+
+    ตอบกลับพร้อมรายงานเต็มว่าได้เวกเตอร์กี่ตัว ใครลงทะเบียนไม่สำเร็จ
+    และไฟล์ไหนมีปัญหาอะไร เพื่อให้แก้ได้ตรงจุดโดยไม่ต้องไปไล่อ่าน log
+    """
+    identifier = getattr(app.state, "identifier", None)
+
+    if identifier is None:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {
+            "status": "error",
+            "message": (
+                getattr(app.state, "identifier_error", None)
+                or "ยังไม่ได้สร้างตัวระบุตัวตน"
+            ),
+        }
+
+    try:
+        # to_thread เพราะการอ่านไฟล์และสกัด embedding เป็นงาน blocking ที่ใช้เวลานาน
+        report = await asyncio.to_thread(identifier.reload)
+    except Exception as exc:  # noqa: BLE001 - endpoint นี้ต้องรายงานสาเหตุเต็ม ๆ
+        logger.exception("สร้างคลังใบหน้าใหม่ไม่สำเร็จ")
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return {"status": "error", "message": f"สร้างคลังใบหน้าใหม่ไม่สำเร็จ: {exc}"}
+
+    return {
+        "status": "ok",
+        "message": (
+            f"สร้างคลังใหม่สำเร็จ: สมาชิก {report.member_count} คน "
+            f"ลงทะเบียนได้ {report.enrolled_count} คน "
+            f"รวม {report.vector_count} เวกเตอร์"
+        ),
+        "report": report.as_dict(),
     }
 
 
@@ -303,7 +390,8 @@ async def websocket_detect(websocket: WebSocket) -> None:
 
     # สร้าง pipeline ใหม่ต่อหนึ่งการเชื่อมต่อ
     # เพราะตัวติดตามจำ track ไว้ข้างใน ถ้าใช้ร่วมกันสองแท็บจะจับคู่ใบหน้ากันมั่ว
-    pipeline = create_pipeline()
+    # ส่วนตัวระบุตัวตนใช้ร่วมกันได้ เพราะคลังเวกเตอร์เป็นข้อมูลอ่านอย่างเดียว
+    pipeline = create_pipeline(identifier=getattr(app.state, "identifier", None))
 
     try:
         while True:
@@ -346,6 +434,8 @@ async def websocket_detect(websocket: WebSocket) -> None:
                 "process_ms": round(process_ms, 1),
                 "detect_ms": round(result.detect_ms, 1),
                 "track_ms": round(result.track_ms, 2),
+                "identify_ms": round(result.identify_ms, 1),
+                "identified_count": result.identified_count,
             })
 
     except WebSocketDisconnect:
