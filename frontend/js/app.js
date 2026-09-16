@@ -282,6 +282,12 @@ async function startCamera() {
     // ปรับภาพให้เป็นกระจกเงาถ้า config สั่ง (ธรรมชาติกว่าสำหรับเว็บแคม)
     el.video.classList.toggle('is-mirrored', Boolean(config.stream.mirror));
 
+    // ตั้งสัดส่วนกล่องตามความละเอียดจริงของเว็บแคม (เช่น 1280x720 หรือ 640x480)
+    // เพื่อให้เห็นภาพทั้งเฟรมโดยไม่มีแถบว่างเหลือทิ้งไว้เปล่า ๆ
+    if (size) {
+      applyAspectRatio(size.width, size.height);
+    }
+
     syncOverlaySize();
     startRenderLoop();
     startDetection();
@@ -573,28 +579,27 @@ function recordSentFrame() {
 // และเมื่อภาพเป็นกระจกเงา ต้องกลับพิกัดแกน X อีกชั้นหนึ่งด้วย
 // ===========================================================================
 
-/** ปรับขนาดและตำแหน่ง canvas ที่วาดกรอบ ให้ทับพื้นที่แสดงภาพพอดีเป๊ะ */
+/**
+ * ปรับขนาด canvas ที่วาดกรอบ ให้ครอบ "ทั้งกล่อง" ไม่ใช่แค่ส่วนที่มีภาพ
+ *
+ * ที่ให้ครอบทั้งกล่องเพราะเมื่อใช้ object-fit: contain แล้วอาจเกิดแถบว่าง
+ * การมีระบบพิกัดจุดเริ่มเดียว (มุมซ้ายบนของกล่อง) ทำให้คิดง่ายและพลาดยาก
+ * ส่วนการชดเชยแถบว่างไปอยู่ที่ getFrameTransform ที่เดียว
+ */
 function syncOverlaySize() {
-  const videoRect = getDisplayElement().getBoundingClientRect();
-  if (videoRect.width === 0 || videoRect.height === 0) return;
-
-  // ต้องวาง canvas ตาม "ตำแหน่งจริงของวิดีโอภายในกล่อง" ไม่ใช่ปักไว้ที่มุมซ้ายบนเฉย ๆ
-  // เพราะกล่องมี min-height และจัดกลางแนวตั้ง ถ้าวิดีโอเตี้ยกว่ากล่อง (เช่นตอนจอแคบมาก)
-  // วิดีโอจะถูกดันลงมากลางกล่อง แล้วกรอบที่วาดจะเลื่อนขึ้นไปจากใบหน้า
   const boxRect = el.videoBox.getBoundingClientRect();
-  const offsetLeft = videoRect.left - boxRect.left;
-  const offsetTop = videoRect.top - boxRect.top;
+  if (boxRect.width === 0 || boxRect.height === 0) return;
 
   // คูณด้วย devicePixelRatio เพื่อให้เส้นคมบนจอความละเอียดสูง
   // ถ้าไม่คูณ กรอบจะเบลอบนจอ Retina / จอ 4K ที่ตั้ง scale ไว้
   const dpr = window.devicePixelRatio || 1;
 
-  el.overlay.width = Math.round(videoRect.width * dpr);
-  el.overlay.height = Math.round(videoRect.height * dpr);
-  el.overlay.style.width = videoRect.width + 'px';
-  el.overlay.style.height = videoRect.height + 'px';
-  el.overlay.style.left = offsetLeft + 'px';
-  el.overlay.style.top = offsetTop + 'px';
+  el.overlay.width = Math.round(boxRect.width * dpr);
+  el.overlay.height = Math.round(boxRect.height * dpr);
+  el.overlay.style.width = boxRect.width + 'px';
+  el.overlay.style.height = boxRect.height + 'px';
+  el.overlay.style.left = '0px';
+  el.overlay.style.top = '0px';
 
   const ctx = el.overlay.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // ทำงานในหน่วย CSS pixel ต่อจากนี้
@@ -628,30 +633,107 @@ function getStreamSize() {
 }
 
 /**
- * คำนวณตัวคูณสำหรับแปลงพิกัด "ภาพที่ส่งไปตรวจ" ให้เป็น "พิกัดบนจอ"
- * คืน null ถ้ายังคำนวณไม่ได้ (กล้องยังไม่พร้อม หรือยังไม่เคยได้ผลจาก backend)
+ * ตั้งสัดส่วนของกล่องภาพให้ตรงกับสตรีมจริง
+ *
+ * ต้องตั้งจาก "ขนาดที่ backend ส่งมาจริง" ไม่ใช่ hardcode 16:9 ไว้ใน CSS
+ * เพราะถ้าเปลี่ยนไปใช้ /stream1 หรือเปลี่ยนรุ่นกล้อง สัดส่วนจะเปลี่ยนตาม
+ * ถ้าสัดส่วนกล่องตรงกับภาพ จะไม่เกิดแถบว่างเลยและใช้พื้นที่จอได้เต็มที่
  */
-function getCoordinateTransform() {
+function applyAspectRatio(width, height) {
+  if (!width || !height) return;
+
+  const ratio = width + ' / ' + height;
+  if (el.videoBox.style.aspectRatio === ratio) return;
+
+  el.videoBox.style.aspectRatio = ratio;
+  // สัดส่วนเปลี่ยน = ขนาดกล่องเปลี่ยน ต้องปรับ canvas ที่วาดกรอบตามทันที
+  syncOverlaySize();
+}
+
+/**
+ * ===========================================================================
+ * ฟังก์ชันแปลงพิกัดหลัก - "เฟรมต้นฉบับ -> พิกัดบน canvas ที่วาดกรอบ"
+ *
+ * ทุกที่ที่ต้องวาดทับภาพต้องเรียกฟังก์ชันนี้ที่เดียว ห้ามกระจายสูตรไว้หลายจุด
+ * เพราะถ้าสูตรไม่ตรงกันแม้แต่ที่เดียว กรอบจะเลื่อนโดยหาสาเหตุยากมาก
+ *
+ * มี 3 อย่างที่ต้องคิดให้ครบ:
+ *
+ *   1. สเกล   - ภาพถูกย่อลงเท่าไรจึงพอดีกล่อง (object-fit: contain)
+ *   2. offset - แถบว่าง (letterbox) ที่เกิดขึ้นเมื่อสัดส่วนกล่องไม่ตรงกับภาพ
+ *               contain จะจัดภาพไว้กลางกล่องเสมอ จึงมีแถบว่างแบ่งครึ่งสองข้าง
+ *   3. mirror - โหมดเว็บแคมพลิกภาพกระจก แต่ canvas ไม่ได้ถูกพลิกตาม
+ *               จึงต้องกลับพิกัดแกน X เอง
+ *
+ * และต้องแปลง 2 ทอด เพราะพิกัดที่ backend ส่งมาอิงกับ "ภาพที่ใช้ตรวจ"
+ * ซึ่งอาจเล็กกว่าสตรีมจริง (โหมดเว็บแคมย่อเหลือกว้าง 640 ก่อนส่ง)
+ *
+ *     พิกัดจากผลตรวจจับ -> ขนาดสตรีมจริง -> ขนาดที่ภาพถูกวาดบนจอ
+ *
+ * คืน null ถ้ายังคำนวณไม่ได้ (ยังไม่มีภาพ หรือกล่องยังไม่มีขนาด)
+ * ===========================================================================
+ */
+function getFrameTransform() {
   if (!detection.lastSourceSize) return null;
 
-  const streamSize = getStreamSize();
-  if (!streamSize) return null;
+  // ขนาดของภาพที่ผลตรวจจับอ้างอิงอยู่
+  const frameWidth = detection.lastSourceSize[0];
+  const frameHeight = detection.lastSourceSize[1];
+  if (!frameWidth || !frameHeight) return null;
 
-  const rect = getDisplayElement().getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return null;
+  // ขนาดจริงของสตรีม (อาจใหญ่กว่าภาพที่ส่งไปตรวจ)
+  const stream = getStreamSize();
+  if (!stream || !stream.width || !stream.height) return null;
 
-  const sentWidth = detection.lastSourceSize[0];
-  const sentHeight = detection.lastSourceSize[1];
+  // พื้นที่ทั้งหมดที่ภาพมีสิทธิ์ใช้
+  const box = el.videoBox.getBoundingClientRect();
+  if (box.width === 0 || box.height === 0) return null;
+
+  // ---- 1. สเกลแบบ contain: ย่อตามด้านที่ "คับ" กว่า เพื่อให้เห็นทั้งเฟรม ----
+  // ใช้ min() ไม่ใช่ max() ตรงนี้คือหัวใจของ contain
+  // ถ้าใช้ max() จะกลายเป็น cover ซึ่งจะตัดขอบภาพทิ้ง
+  const scale = Math.min(box.width / stream.width, box.height / stream.height);
+
+  const drawnWidth = stream.width * scale;
+  const drawnHeight = stream.height * scale;
+
+  // ---- 2. แถบว่างจาก letterbox (แบ่งครึ่งสองข้างเพราะ contain จัดภาพไว้กลาง) ----
+  const offsetX = (box.width - drawnWidth) / 2;
+  const offsetY = (box.height - drawnHeight) / 2;
+
+  // ---- ตัวคูณรวม: จากพิกัดของภาพที่ใช้ตรวจ ไปเป็นพิกเซลบนจอ ----
+  const scaleX = drawnWidth / frameWidth;
+  const scaleY = drawnHeight / frameHeight;
+
+  const mirrored = Boolean(config.stream.mirror);
 
   return {
-    // ชั้นที่ 1 -> ชั้นที่ 2 : จากภาพที่ส่ง ไปเป็นพิกัดบนสตรีมจริง
-    toStreamX: streamSize.width / sentWidth,
-    toStreamY: streamSize.height / sentHeight,
-    // ชั้นที่ 2 -> ชั้นที่ 3 : จากสตรีมจริง ไปเป็นพิกัดบนจอ
-    toDisplayX: rect.width / streamSize.width,
-    toDisplayY: rect.height / streamSize.height,
-    displayWidth: rect.width,
-    displayHeight: rect.height,
+    scaleX: scaleX,
+    scaleY: scaleY,
+    offsetX: offsetX,
+    offsetY: offsetY,
+    drawnWidth: drawnWidth,
+    drawnHeight: drawnHeight,
+    mirrored: mirrored,
+
+    /**
+     * แปลงกรอบสี่เหลี่ยมจากพิกัดเฟรมต้นฉบับ ไปเป็นพิกัดบน canvas
+     * @returns {{x:number, y:number, w:number, h:number}}
+     */
+    rect: function (x, y, w, h) {
+      const width = w * scaleX;
+      const height = h * scaleY;
+      const top = offsetY + y * scaleY;
+
+      // ภาพถูกพลิกกระจกด้วย CSS transform: scaleX(-1) แต่ canvas ไม่ได้ถูกพลิกตาม
+      // จึงต้องกลับพิกัดแกน X เอง โดยกลับ "ภายในพื้นที่ที่ภาพถูกวาด" เท่านั้น
+      // ไม่ใช่กลับทั้งกล่อง ไม่งั้นแถบว่างจะทำให้กรอบเลื่อนไปอีก
+      const left = mirrored
+        ? offsetX + drawnWidth - (x + w) * scaleX
+        : offsetX + x * scaleX;
+
+      return { x: left, y: top, w: width, h: height };
+    },
   };
 }
 
@@ -802,10 +884,14 @@ function drawBoxes() {
   const ctx = el.overlay.getContext('2d');
   clearOverlay();
 
-  const tf = getCoordinateTransform();
+  const tf = getFrameTransform();
   if (!tf) return;
 
-  const mirrored = Boolean(config.stream.mirror);
+  // ขอบเขตของ "พื้นที่ที่ภาพถูกวาดจริง" ใช้ดันป้ายให้อยู่ในภาพ ไม่ไปลอยบนแถบว่าง
+  const imageLeft = tf.offsetX;
+  const imageTop = tf.offsetY;
+  const imageRight = tf.offsetX + tf.drawnWidth;
+  const imageBottom = tf.offsetY + tf.drawnHeight;
 
   ctx.lineWidth = BOX_LINE_WIDTH;
   ctx.font = '600 14px "Sarabun", "Segoe UI", sans-serif';
@@ -817,16 +903,12 @@ function drawBoxes() {
 
     const c = entry.current;
 
-    let x = c.x * tf.toStreamX * tf.toDisplayX;
-    const y = c.y * tf.toStreamY * tf.toDisplayY;
-    const w = c.w * tf.toStreamX * tf.toDisplayX;
-    const h = c.h * tf.toStreamY * tf.toDisplayY;
-
-    // ภาพถูกพลิกกระจกด้วย CSS transform: scaleX(-1) แต่ canvas ไม่ได้ถูกพลิกตาม
-    // จึงต้องกลับพิกัดแกน X เอง ไม่งั้นกรอบจะไปโผล่คนละฝั่งกับใบหน้า
-    if (mirrored) {
-      x = tf.displayWidth - (x + w);
-    }
+    // แปลงพิกัดที่เดียวผ่านฟังก์ชันกลาง (คิดสเกล แถบว่าง และ mirror ให้ครบแล้ว)
+    const box = tf.rect(c.x, c.y, c.w, c.h);
+    const x = box.x;
+    const y = box.y;
+    const w = box.w;
+    const h = box.h;
 
     const color = BOX_COLORS[entry.identityState] || BOX_COLORS.pending;
 
@@ -841,17 +923,18 @@ function drawBoxes() {
     const textWidth = ctx.measureText(label).width;
     const labelWidth = textWidth + padding * 2;
 
-    // ถ้าป้ายล้นขอบบนของภาพ ให้ย้ายไปไว้ใต้กรอบแทน
+    // ถ้าป้ายล้นขอบบนของ "ภาพ" ให้ย้ายไปไว้ใต้กรอบแทน
+    // เทียบกับขอบภาพ ไม่ใช่ขอบกล่อง เพราะแถบว่างไม่ใช่ที่ที่ควรมีป้ายไปลอยอยู่
     let labelY = y - labelHeight - 2;
-    if (labelY < 0) {
+    if (labelY < imageTop) {
       labelY = y + h + 2;
     }
 
-    // ถ้าป้ายยาวจนล้นขอบขวา ให้ดันกลับเข้ามาให้อ่านครบ
+    // ถ้าป้ายยาวจนล้นขอบขวาของภาพ ให้ดันกลับเข้ามาให้อ่านครบ
     // (ชื่อไทยเต็ม ๆ กับรหัสนักศึกษารวมกันยาวกว่ากรอบใบหน้าเสมอ)
     let labelX = x;
-    if (labelX + labelWidth > tf.displayWidth) {
-      labelX = Math.max(0, tf.displayWidth - labelWidth);
+    if (labelX + labelWidth > imageRight) {
+      labelX = Math.max(imageLeft, imageRight - labelWidth);
     }
 
     // พื้นหลังทึบรองข้อความ เพื่อให้อ่านออกแม้ฉากหลังสว่าง
@@ -873,13 +956,14 @@ function drawBoxes() {
       const nameLabelIsBelow = labelY > y;
       let dirY = y + h + 2 + (nameLabelIsBelow ? labelHeight + 2 : 0);
 
-      if (dirY + dirHeight > tf.displayHeight) {
-        dirY = Math.max(0, y + h - dirHeight - 2);
+      // ล้นขอบล่างของภาพ ให้ย้ายขึ้นมาไว้ในกรอบแทน
+      if (dirY + dirHeight > imageBottom) {
+        dirY = Math.max(imageTop, y + h - dirHeight - 2);
       }
 
       let dirX = x;
-      if (dirX + dirWidth > tf.displayWidth) {
-        dirX = Math.max(0, tf.displayWidth - dirWidth);
+      if (dirX + dirWidth > imageRight) {
+        dirX = Math.max(imageLeft, imageRight - dirWidth);
       }
 
       // "อยู่กับที่" ใช้สีเทาเข้มให้ดูเงียบกว่า เพราะไม่ใช่เหตุการณ์ที่ต้องสนใจ
@@ -924,7 +1008,9 @@ const resizeObserver = new ResizeObserver(() => {
   if (!camera.isRunning) return;
   syncOverlaySize();
 });
-resizeObserver.observe(el.video);
+// เฝ้าที่ "กล่อง" ไม่ใช่ที่ตัววิดีโอ เพราะตอนนี้ภาพวางทับกล่องแบบ absolute
+// ขนาดที่เปลี่ยนจริงคือขนาดกล่อง (ตอนย่อ-ขยายหน้าต่าง หรือตอนสัดส่วนเปลี่ยน)
+resizeObserver.observe(el.videoBox);
 
 // ===========================================================================
 // ส่วนที่ 4.5: โหมดกล้อง IP (เฟส 6)
@@ -1113,6 +1199,9 @@ async function handleStreamFrame(buffer) {
   if (el.streamCanvas.width !== bitmap.width || el.streamCanvas.height !== bitmap.height) {
     el.streamCanvas.width = bitmap.width;
     el.streamCanvas.height = bitmap.height;
+    // ตั้งสัดส่วนกล่องตามขนาดจริงที่กล้องส่งมา ไม่ได้ hardcode ไว้
+    // ถ้าเปลี่ยนไปใช้ /stream1 หรือเปลี่ยนรุ่นกล้อง สัดส่วนจะปรับตามเอง
+    applyAspectRatio(bitmap.width, bitmap.height);
     syncOverlaySize();
     setText(el.statResolution, bitmap.width + ' × ' + bitmap.height);
   }
