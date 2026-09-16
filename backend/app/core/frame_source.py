@@ -334,8 +334,33 @@ class RTSPFrameSource(FrameSource):
         timeout = settings.rtsp.watchdog_timeout
         last_good_at = time.monotonic()
 
+        # ช่วงห่างขั้นต่ำระหว่างเฟรมที่เราจะ "เอามาใช้จริง" (เฟส 7)
+        # ---- ตัวคุมอัตราแบบ token bucket ----
+        #
+        # ทำไมไม่ใช้วิธีง่าย ๆ อย่าง "ห่างจากเฟรมก่อนหน้าครบ 1/fps หรือยัง":
+        # เพราะเฟรมจากกล้องมาไม่สม่ำเสมอ แต่มาเป็น "ช่อ" (burst)
+        # เช่นสองเฟรมมาห่างกัน 20 ms แล้วเว้นไป 130 ms
+        # วิธีวัดระยะห่างจะทิ้งเฟรมที่สองของทุกช่อ ทั้งที่อัตราเฉลี่ยยังไม่เกินที่ตั้งไว้เลย
+        # วัดจริงแล้วกล้องส่งได้ 13 fps แต่เหลือถึงเราแค่ 9.6
+        #
+        # token bucket แก้ตรงนี้พอดี: เติม token ตามเวลาที่ผ่านไป
+        # เฟรมหนึ่งใช้หนึ่ง token ถ้ามี token เหลือก็เก็บเฟรมได้แม้จะมาติดกัน
+        # ส่วนเพดานของถัง (burst_size) กันไม่ให้สะสม token ไว้นานจนปล่อยรัวผิดปกติ
+        capture_fps = max(1, settings.rates.capture_fps)
+        burst_size = 2.0
+        tokens = burst_size
+        last_token_at = time.monotonic()
+
         while not self._stop_event.is_set():
-            ok, image = capture.read()
+            # ---- แยกการอ่านออกเป็นสองขั้น: grab แล้วค่อย retrieve ----
+            #
+            # grab()     = ดึงแพ็กเก็ตถัดไปออกจากสตรีม (ต้องทำทุกเฟรมเสมอ
+            #              ไม่งั้นข้อมูลจะกองค้างอยู่ในบัฟเฟอร์แล้วภาพช้ากว่าจริง)
+            # retrieve() = แปลงเป็นภาพ BGR ที่ใช้งานได้ ซึ่งเป็นขั้นที่กิน CPU
+            #
+            # เฟรมที่เกินอัตรา CAPTURE_FPS จึงถูก grab ทิ้งโดยไม่ต้อง retrieve
+            # ประหยัด CPU ได้จริงเพราะไม่ต้องแปลงสีภาพที่ยังไงก็ไม่ได้ใช้
+            ok = capture.grab()
             now = time.monotonic()
 
             # ---- watchdog: ไม่ได้เฟรมใหม่นานเกินไป ----
@@ -352,7 +377,7 @@ class RTSPFrameSource(FrameSource):
                 )
                 return
 
-            if not ok or image is None:
+            if not ok:
                 # อ่านพลาดครั้งสองครั้งเป็นเรื่องปกติของเครือข่าย ยังไม่ต้องต่อใหม่
                 # ปล่อยให้ watchdog ด้านบนเป็นคนตัดสินว่าพอแล้ว
                 # หน่วงสั้น ๆ ไม่ให้วนกินซีพียูเปล่า ๆ ตอนกล้องมีปัญหา
@@ -360,7 +385,23 @@ class RTSPFrameSource(FrameSource):
                     return
                 continue
 
+            # grab สำเร็จ = สตรีมยังมีชีวิตอยู่ นับเป็นเฟรมดีสำหรับ watchdog
             last_good_at = now
+
+            # ---- เติม token ตามเวลาที่ผ่านไป แล้วดูว่ามีพอจะเก็บเฟรมนี้ไหม ----
+            tokens = min(burst_size, tokens + (now - last_token_at) * capture_fps)
+            last_token_at = now
+
+            # token ไม่พอ = อัตราเฉลี่ยเกินที่ตั้งไว้แล้ว ทิ้งเฟรมนี้ไปเลย
+            # ไม่ต้องเสียแรงแปลงเป็นภาพ BGR ซึ่งเป็นขั้นที่กิน CPU
+            if tokens < 1.0:
+                continue
+
+            ok, image = capture.retrieve()
+            if not ok or image is None:
+                continue
+
+            tokens -= 1.0
 
             with self._lock:
                 self._frame_counter += 1

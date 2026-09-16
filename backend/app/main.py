@@ -34,6 +34,7 @@ from app.core.frame_source import (
     create_frame_sources,
 )
 from app.core.pipeline import create_pipeline
+from app.core.stream_runner import CameraRunner
 from app.core.tracker import tracks_to_dicts
 from app.db.database import database
 from app.face.detector import FaceModelError, face_detector
@@ -143,8 +144,20 @@ async def lifespan(_: FastAPI):
                 "เปิดใช้งาน" if camera.enabled else "ปิดอยู่",
             )
 
+    # ---- ตัวขับสตรีมหนึ่งตัวต่อหนึ่งกล้อง (เฟส 7) ----
+    # สร้างตอนสตาร์ท ไม่ใช่ตอนมีคนเปิดหน้าเว็บ เพราะระบบต้องรู้ว่าใครเดินผ่าน
+    # แม้ตอนนั้นจะไม่มีใครเฝ้าดูอยู่เลยก็ตาม
+    app.state.camera_runners = {}
+    for camera_id, source in app.state.frame_sources.items():
+        if isinstance(source, RTSPFrameSource):
+            runner = CameraRunner(source, identifier=app.state.identifier)
+            await runner.start()
+            app.state.camera_runners[camera_id] = runner
+
     yield
 
+    for runner in getattr(app.state, "camera_runners", {}).values():
+        await runner.stop()
     for source in app.state.frame_sources.values():
         source.stop()
     database.close()
@@ -241,7 +254,7 @@ def health(response: Response) -> dict[str, Any]:
         "app": {
             "name": settings.app.name,
             "version": settings.app.version,
-            "phase": 6,
+            "phase": 7,
         },
         "database": {
             "connected": db_health.connected,
@@ -512,43 +525,22 @@ async def websocket_detect(websocket: WebSocket) -> None:
 
 
 # =============================================================================
-# WebSocket: backend push ภาพจากกล้อง IP ไปให้หน้าเว็บ (เฟส 6)
+# WebSocket: backend push ภาพจากกล้อง IP ไปให้หน้าเว็บ (เฟส 6 + 7)
 # =============================================================================
 #
 # ต่างจาก /ws/detect ตรงทิศทางของภาพ:
 #     /ws/detect  เบราว์เซอร์ -> backend  (ภาพมาจากเว็บแคมของผู้ใช้)
 #     /ws/stream  backend -> เบราว์เซอร์  (ภาพมาจากกล้อง IP ที่ backend ต่ออยู่)
 #
-# รูปแบบข้อความที่ push ออกไป เป็น binary ก้อนเดียวที่ประกอบด้วยสองส่วน:
+# ตั้งแต่เฟส 7 เป็นต้นมา endpoint นี้ "ไม่ได้ประมวลผลอะไรเองเลย"
+# หน้าที่ทั้งหมดคือไปสมัครรับภาพจาก CameraRunner ของกล้องตัวนั้น
+# แล้วส่งต่อให้เบราว์เซอร์
 #
-#     [ 4 ไบต์ ][ ..... JSON ..... ][ ..... ข้อมูล JPEG ..... ]
-#      ความยาว     ข้อมูลกำกับ            ภาพหนึ่งเฟรม
-#      ของ JSON     (tracks ฯลฯ)
-#      uint32 LE
-#
-# ที่รวมเป็นก้อนเดียวแทนที่จะส่งสองข้อความ (JSON แล้วตามด้วย binary)
-# เพราะภาพกับผลตรวจจับต้องคู่กันเสมอ ถ้าแยกส่งแล้วมีอะไรพลาดกลางทาง
-# หน้าเว็บจะเอาผลของเฟรมหนึ่งไปวาดทับภาพของอีกเฟรมหนึ่งโดยไม่มีใครรู้
+# เหตุผล: CameraRunner ตัวเดียวทำงานให้ผู้ชมทุกคน
+# ถ้าให้แต่ละการเชื่อมต่อประมวลผลเอง ผู้ดูแลสองคนเปิดดูพร้อมกัน
+# จะกลายเป็นรัน AI ซ้ำสองชุดกับภาพเดียวกัน ซึ่งเปลืองเครื่องโดยไม่จำเป็น
+# (รายละเอียดโครงสร้างอยู่ใน core/stream_runner.py)
 # =============================================================================
-
-STREAM_HEADER_FORMAT = "<I"
-STREAM_HEADER_SIZE = struct.calcsize(STREAM_HEADER_FORMAT)
-
-
-def _encode_stream_message(meta: dict[str, Any], jpeg: bytes) -> bytes:
-    """ประกอบข้อความ binary ก้อนเดียวจากข้อมูลกำกับและภาพ"""
-    payload = json.dumps(meta, ensure_ascii=False).encode("utf-8")
-    return struct.pack(STREAM_HEADER_FORMAT, len(payload)) + payload + jpeg
-
-
-def _encode_jpeg(image, quality: int) -> bytes | None:
-    """เข้ารหัสภาพเป็น JPEG คืน None ถ้าไม่สำเร็จ"""
-    import cv2
-
-    ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-    if not ok:
-        return None
-    return buffer.tobytes()
 
 
 @app.websocket("/ws/stream")
@@ -561,7 +553,7 @@ async def websocket_stream(websocket: WebSocket) -> None:
     await websocket.accept()
 
     client = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "?"
-    sources = getattr(app.state, "frame_sources", {}) or {}
+    runners = getattr(app.state, "camera_runners", {}) or {}
 
     # ---- ตรวจความพร้อมก่อนเริ่มส่ง ----
     if settings.stream.source != "rtsp":
@@ -584,23 +576,22 @@ async def websocket_stream(websocket: WebSocket) -> None:
 
     # ---- เลือกกล้อง ----
     requested = websocket.query_params.get("camera")
-    rtsp_sources = {k: v for k, v in sources.items() if isinstance(v, RTSPFrameSource)}
 
     if requested:
-        source = rtsp_sources.get(requested)
-        if source is None:
+        runner = runners.get(requested)
+        if runner is None:
             await websocket.send_json({
                 "type": "error",
                 "message": (
                     f"ไม่พบกล้องชื่อ {requested!r} "
-                    f"(กล้องที่เปิดใช้งานอยู่: {', '.join(rtsp_sources) or 'ไม่มีเลย'})"
+                    f"(กล้องที่เปิดใช้งานอยู่: {', '.join(runners) or 'ไม่มีเลย'})"
                 ),
             })
             await websocket.close(code=1011)
             return
     else:
-        source = next(iter(rtsp_sources.values()), None)
-        if source is None:
+        runner = next(iter(runners.values()), None)
+        if runner is None:
             await websocket.send_json({
                 "type": "error",
                 "message": "ไม่มีกล้องที่เปิดใช้งานอยู่เลย (ตรวจ CAMERA_IDS ในไฟล์ .env)",
@@ -608,38 +599,29 @@ async def websocket_stream(websocket: WebSocket) -> None:
             await websocket.close(code=1011)
             return
 
-    camera_id = source.camera.id
+    camera_id = runner.camera_id
+    source = runner.source
     logger.info("WebSocket /ws/stream เชื่อมต่อจาก %s ดูกล้อง %s", client, camera_id)
 
-    pipeline = create_pipeline(identifier=getattr(app.state, "identifier", None))
-
-    # อัตราการส่งภาพไปหน้าเว็บ เฟส 7 จะแยกค่านี้ออกจากอัตราการตรวจจับ
-    interval = 1.0 / max(1, settings.stream.send_fps)
-    jpeg_quality = int(settings.stream.jpeg_quality * 100)
-
-    last_sent_frame_id = -1
+    queue = runner.subscribe()
     last_alive = True
 
     try:
         while True:
-            loop_started = asyncio.get_running_loop().time()
-
-            frame = source.read()
-
             # ---- กล้องหลุด: แจ้งหน้าเว็บทันที ไม่ปล่อยให้ภาพค้างเงียบ ๆ ----
             alive = source.is_alive()
+
             if not alive:
                 if last_alive:
                     logger.warning("กล้อง %s ไม่ส่งภาพแล้ว แจ้งหน้าเว็บ", camera_id)
-                last_alive = False
+                    last_alive = False
                 await websocket.send_json({
                     "type": "camera_status",
                     "camera": camera_id,
                     "alive": False,
                     "status": source.status(),
                 })
-                # รอแล้ววนใหม่ ไม่ต้องรีบ เพราะยังไม่มีภาพให้ส่ง
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
                 continue
 
             if not last_alive:
@@ -652,42 +634,15 @@ async def websocket_stream(websocket: WebSocket) -> None:
                 })
             last_alive = True
 
-            if frame is None or frame.frame_id == last_sent_frame_id:
-                # ยังไม่มีเฟรมใหม่ รอสั้น ๆ แล้ววนดูใหม่
-                await asyncio.sleep(0.01)
+            # ---- รอเฟรมถัดไปจากตัวขับสตรีม ----
+            # ตั้ง timeout ไว้เพื่อให้วนกลับไปเช็คสถานะกล้องได้เรื่อย ๆ
+            # แม้ตอนที่ไม่มีเฟรมเข้ามาเลย (เช่นกล้องเพิ่งหลุด)
+            try:
+                message = await asyncio.wait_for(queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
                 continue
 
-            last_sent_frame_id = frame.frame_id
-
-            # ---- ประมวลผล (งานหนัก ต้องอยู่ใน thread แยก) ----
-            result = await asyncio.to_thread(pipeline.process, frame)
-
-            # ---- เข้ารหัสภาพ (งานหนักเช่นกัน) ----
-            jpeg = await asyncio.to_thread(_encode_jpeg, frame.image, jpeg_quality)
-            if jpeg is None:
-                logger.warning("เข้ารหัส JPEG ของกล้อง %s ไม่สำเร็จ", camera_id)
-                continue
-
-            meta = {
-                "type": "frame",
-                "camera": camera_id,
-                "frame_id": result.frame_id,
-                "tracks": tracks_to_dicts(result.tracks),
-                "detected_count": result.detected_count,
-                "source_size": list(result.source_size),
-                "detect_ms": round(result.detect_ms, 1),
-                "track_ms": round(result.track_ms, 2),
-                "identify_ms": round(result.identify_ms, 1),
-                # อายุของเฟรมตอนที่ส่งออกไป ใช้ดูว่า latency ถ่างขึ้นหรือไม่
-                "frame_age_ms": round((time.monotonic() - frame.received_at) * 1000, 1),
-            }
-
-            await websocket.send_bytes(_encode_stream_message(meta, jpeg))
-
-            # ---- คุมอัตราการส่ง ----
-            elapsed = asyncio.get_running_loop().time() - loop_started
-            if elapsed < interval:
-                await asyncio.sleep(interval - elapsed)
+            await websocket.send_bytes(message)
 
     except WebSocketDisconnect:
         logger.info("WebSocket /ws/stream ตัดการเชื่อมต่อ (%s)", client)
@@ -697,3 +652,7 @@ async def websocket_stream(websocket: WebSocket) -> None:
             await websocket.close(code=1011)
         except RuntimeError:
             pass
+    finally:
+        # ต้องยกเลิกการสมัครรับเสมอ ไม่งั้นคิวจะค้างอยู่ใน runner
+        # แล้ว runner จะเข้าใจผิดว่ายังมีคนดูอยู่ ทำให้เข้ารหัสภาพต่อไปเรื่อย ๆ
+        runner.unsubscribe(queue)

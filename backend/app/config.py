@@ -141,7 +141,7 @@ class AppSettings:
     """ค่าทั่วไปของแอปพลิเคชัน"""
 
     name: str = "Classroom Access Detection System"
-    version: str = "0.6.0"  # เฟส 6: รับภาพจากกล้อง IP จริง (RTSP)
+    version: str = "0.7.0"  # เฟส 7: แยกอัตรา fps ให้ภาพลื่นขึ้น
     log_level: str = "INFO"
     timezone: str = "Asia/Bangkok"
 
@@ -189,6 +189,43 @@ class FaceSettings:
     def rec_model_path(self) -> Path:
         """path เต็มของโฟลเดอร์ชุดโมเดลจดจำใบหน้า"""
         return self.models_dir / self.rec_pack
+
+
+@dataclass(frozen=True)
+class RateSettings:
+    """อัตราการทำงานของแต่ละขั้น แยกอิสระจากกัน (เฟส 7)
+
+    ============================================================================
+    ทำไมต้องแยกสามค่า
+    ============================================================================
+
+    ก่อนหน้านี้ทุกอย่างเดินด้วยจังหวะเดียวกัน คือ "อ่านเฟรม -> ตรวจ -> ส่ง"
+    ผลคืออัตราที่หน้าเว็บได้ภาพ ถูกล็อกไว้เท่ากับความเร็วของ AI เสมอ
+    AI ใช้ ~100 ms ต่อเฟรม หน้าเว็บจึงได้ภาพแค่ ~8 fps ซึ่งตาคนเห็นว่ากระตุก
+
+    แต่ความจริงแล้วสองอย่างนี้ไม่จำเป็นต้องเท่ากันเลย:
+        - ตำแหน่งใบหน้าเปลี่ยนช้า ตรวจ 5 ครั้งต่อวินาทีก็เพียงพอ
+        - ส่วนภาพต้องลื่น ควรส่ง 15 ครั้งต่อวินาทีขึ้นไป
+
+    พอแยกจากกันแล้ว ภาพจะลื่นขึ้นมากโดยที่เครื่องทำงานน้อยลงด้วยซ้ำ
+    ระหว่างเฟรมที่ยังไม่มีผลตรวจใหม่ หน้าเว็บจะ interpolate กรอบต่อไปเอง
+    (กลไกที่ทำไว้ตั้งแต่เฟส 3)
+    """
+
+    # อัตราสูงสุดที่ดึงเฟรมจากกล้องมาใช้งาน
+    # กล้องส่งมา ~15 fps ถ้าตั้งต่ำกว่านั้นจะข้ามเฟรมส่วนเกินทิ้งตั้งแต่ต้นทาง
+    # ช่วยลดภาระ CPU เพราะไม่ต้องแปลงสีภาพที่ยังไงก็ไม่ได้ใช้
+    capture_fps: int
+
+    # อัตราที่ส่งภาพเข้าโมเดล AI - ตัวนี้แพงที่สุด ตั้งต่ำไว้
+    detect_fps: int
+
+    # อัตราที่ส่งภาพไปหน้าเว็บ - ตั้งสูงได้เพราะแค่เข้ารหัส JPEG ไม่ได้คิดอะไรหนัก
+    stream_fps: int
+
+    # ผลตรวจเก่าเกินกี่เฟรมของสตรีม จึงเริ่มทำให้กรอบจางลง
+    # เพื่อบอกผู้ใช้ว่า "กำลังเดาตำแหน่งอยู่" ไม่ใช่ผลสด
+    stale_after_frames: int
 
 
 @dataclass(frozen=True)
@@ -448,6 +485,7 @@ class Settings:
     identify: IdentifySettings
     direction: DirectionSettings
     rtsp: RTSPSettings
+    rates: RateSettings
 
 
 # แหล่งภาพที่ระบบรองรับ - ใส่ค่านอกเหนือจากนี้ต้องฟ้อง ไม่ใช่เงียบ ๆ แล้วใช้ค่า default
@@ -637,6 +675,12 @@ def load_settings() -> Settings:
             watchdog_timeout=_get_float("RTSP_WATCHDOG_TIMEOUT", 5.0),
             reconnect_initial_delay=_get_float("RTSP_RECONNECT_INITIAL_DELAY", 1.0),
             reconnect_max_delay=_get_float("RTSP_RECONNECT_MAX_DELAY", 30.0),
+        ),
+        rates=RateSettings(
+            capture_fps=_get_int("CAPTURE_FPS", 15),
+            detect_fps=_get_int("DETECT_FPS", 5),
+            stream_fps=_get_int("STREAM_FPS", 15),
+            stale_after_frames=_get_int("STALE_AFTER_FRAMES", 6),
         ),
         stream=StreamSettings(
             source=frame_source,

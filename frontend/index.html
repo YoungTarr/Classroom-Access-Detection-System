@@ -84,6 +84,12 @@
           <span class="stat__label">FPS ที่ส่งจริง</span>
           <span class="stat__value" id="stat-fps">—</span>
         </div>
+        <!-- เฟส 7: อัตราสามค่าที่ "วัดได้จริง" ไม่ใช่ค่าที่ตั้งไว้ใน .env
+             แสดงแยกกันเพื่อให้เห็นว่าขั้นไหนเป็นคอขวด -->
+        <div class="stat" id="stat-rates-box" hidden>
+          <span class="stat__label">อ่านกล้อง / ตรวจจับ / ส่งภาพ</span>
+          <span class="stat__value" id="stat-rates">—</span>
+        </div>
         <!-- อายุของเฟรมตอนถึงหน้าจอ - ตัวเลขนี้ต้องไม่ไต่ขึ้นเรื่อย ๆ
              ถ้าไต่ขึ้นแปลว่ามีคิวเฟรมสะสมอยู่ที่ไหนสักแห่ง -->
         <div class="stat" id="stat-latency-box" hidden>

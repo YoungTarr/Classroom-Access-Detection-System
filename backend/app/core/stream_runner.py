@@ -1,0 +1,409 @@
+"""ตัวขับสตรีมของกล้องหนึ่งตัว - แยกอัตราการทำงานสามระดับ (เฟส 7)
+
+============================================================================
+โครงสร้าง
+============================================================================
+
+    RTSPFrameSource (thread)      อ่านจากกล้องที่ CAPTURE_FPS
+            |                     เก็บแค่เฟรมล่าสุด
+            v
+    _detect_loop (async task)     ตรวจจับ+จดจำที่ DETECT_FPS (ต่ำ เช่น 5)
+            |                     งานหนักทำใน thread แยก
+            v
+    _stream_loop (async task)     เข้ารหัส JPEG + ส่งที่ STREAM_FPS (สูง เช่น 15)
+            |                     งานเข้ารหัสก็ทำใน thread แยกเช่นกัน
+            v
+    ผู้ชมทุกคนที่เปิดดูกล้องตัวนี้
+
+============================================================================
+สองเรื่องสำคัญที่โครงสร้างนี้แก้
+============================================================================
+
+1. **ภาพลื่นขึ้นโดยไม่ต้องเร่ง AI**
+   เดิมทุกอย่างเดินจังหวะเดียวกัน หน้าเว็บจึงได้ภาพเท่าความเร็วของ AI (~8 fps)
+   ตอนนี้ภาพวิ่งที่ STREAM_FPS ส่วน AI เดินช้ากว่าได้ตามสบาย
+   เฟรมที่ยังไม่มีผลตรวจใหม่จะถูกทำเครื่องหมาย is_fresh=false
+   แล้วหน้าเว็บจะ interpolate กรอบต่อไปเอง (กลไกจากเฟส 3)
+
+2. **AI ทำงานชุดเดียวต่อกล้อง ไม่ว่าจะมีคนเปิดดูกี่คน**
+   เดิมสร้าง pipeline ใหม่ทุกครั้งที่มีคนเปิดหน้าเว็บ
+   ผู้ดูแลสองคนเปิดพร้อมกัน = รัน AI ซ้ำสองชุดกับภาพเดียวกัน
+   ตอนนี้ตัวขับตัวเดียวทำงานให้ทุกคน ผู้ชมแค่มา "สมัครรับ" ภาพที่ส่งออกไป
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import struct
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from app.config import settings
+from app.core.frame_source import RTSPFrameSource
+from app.core.pipeline import Pipeline
+from app.core.tracker import tracks_to_dicts
+from app.identify.base import Identifier
+
+logger = logging.getLogger(__name__)
+
+# หัวข้อความ: ความยาวของส่วน JSON เป็น uint32 little-endian
+STREAM_HEADER_FORMAT = "<I"
+STREAM_HEADER_SIZE = struct.calcsize(STREAM_HEADER_FORMAT)
+
+
+def encode_stream_message(meta: dict[str, Any], jpeg: bytes) -> bytes:
+    """ประกอบข้อความ binary ก้อนเดียวจากข้อมูลกำกับและภาพ
+
+        [ 4 ไบต์ ][ ..... JSON ..... ][ ..... JPEG ..... ]
+         ความยาว JSON
+
+    ที่รวมเป็นก้อนเดียวแทนการส่งสองข้อความ เพราะภาพกับผลตรวจต้องคู่กันเสมอ
+    ถ้าแยกส่งแล้วมีอะไรพลาดกลางทาง หน้าเว็บจะเอาผลของเฟรมหนึ่ง
+    ไปวาดทับภาพของอีกเฟรมหนึ่งโดยไม่มีใครรู้
+    """
+    payload = json.dumps(meta, ensure_ascii=False).encode("utf-8")
+    return struct.pack(STREAM_HEADER_FORMAT, len(payload)) + payload + jpeg
+
+
+class RateMeter:
+    """วัดอัตราที่เกิดขึ้น "จริง" ของแต่ละขั้น
+
+    ต้องวัดของจริง ไม่ใช่รายงานค่าที่ตั้งไว้ใน config
+    เพราะถ้าเครื่องทำไม่ทันค่าที่ตั้ง ผู้ใช้ต้องเห็นตัวเลขที่ทำได้จริง
+    ไม่งั้นจะจูนอะไรไม่ถูกเลย
+    """
+
+    def __init__(self, window_seconds: float = 3.0) -> None:
+        self.window = window_seconds
+        self._timestamps: list[float] = []
+
+    def tick(self) -> None:
+        now = time.monotonic()
+        self._timestamps.append(now)
+        cutoff = now - self.window
+        while self._timestamps and self._timestamps[0] < cutoff:
+            self._timestamps.pop(0)
+
+    @property
+    def fps(self) -> float:
+        if len(self._timestamps) < 2:
+            return 0.0
+        span = self._timestamps[-1] - self._timestamps[0]
+        if span <= 0:
+            return 0.0
+        return (len(self._timestamps) - 1) / span
+
+
+@dataclass
+class DetectionSnapshot:
+    """ผลตรวจจับหนึ่งชุด ใช้ร่วมกันโดยผู้ชมทุกคน
+
+    แปลงเป็น dict ไว้ตั้งแต่ต้นทาง เพราะจะถูกส่งซ้ำหลายเฟรมและหลายคน
+    ถ้าแปลงใหม่ทุกครั้งจะเสียแรงเปล่า
+    """
+
+    frame_id: int
+    tracks: list[dict] = field(default_factory=list)
+    detected_count: int = 0
+    source_size: tuple[int, int] = (0, 0)
+    detect_ms: float = 0.0
+    track_ms: float = 0.0
+    identify_ms: float = 0.0
+    created_at: float = 0.0
+
+
+class CameraRunner:
+    """ตัวขับสตรีมของกล้องหนึ่งตัว"""
+
+    def __init__(self, source: RTSPFrameSource, identifier: Identifier | None) -> None:
+        self.source = source
+        self.camera_id = source.camera.id
+
+        # pipeline ตัวเดียวต่อกล้อง (ตัวติดตามจำ track ไว้ข้างใน จึงห้ามใช้ร่วมข้ามกล้อง)
+        self.pipeline = Pipeline(identifier=identifier)
+
+        self._detect_task: asyncio.Task | None = None
+        self._stream_task: asyncio.Task | None = None
+        self._stopping = False
+
+        # ผลตรวจล่าสุดที่ผู้ชมทุกคนใช้ร่วมกัน
+        self._latest_detection: DetectionSnapshot | None = None
+
+        # คิวของผู้ชมแต่ละคน ขนาด 1 เพราะถ้าใครรับช้าให้ทิ้งเฟรมเก่าไปเลย
+        # ไม่ปล่อยให้คิวยาวจนภาพของคนนั้นช้ากว่าความจริง (หลักการเดียวกับ frame_source)
+        self._subscribers: set[asyncio.Queue] = set()
+
+        # ตัวนับเฟรมที่ส่งออก ใช้เป็น frame_id ของสตรีม
+        self._stream_frame_id = 0
+
+        # เฟรมสตรีมที่ผ่านไปแล้วนับตั้งแต่ได้ผลตรวจชุดล่าสุด
+        self._frames_since_detection = 0
+
+        # มาตรวัดอัตราจริงของทั้งสามขั้น
+        self.capture_meter = RateMeter()
+        self.detect_meter = RateMeter()
+        self.stream_meter = RateMeter()
+
+        self._last_capture_frame_id = -1
+
+    # ------------------------------------------------------------------
+    # วงจรชีวิต
+    # ------------------------------------------------------------------
+    async def start(self) -> None:
+        if self._detect_task is not None:
+            return
+        self._stopping = False
+        self._detect_task = asyncio.create_task(
+            self._detect_loop(), name=f"detect-{self.camera_id}"
+        )
+        self._stream_task = asyncio.create_task(
+            self._stream_loop(), name=f"stream-{self.camera_id}"
+        )
+        logger.info(
+            "เริ่มตัวขับสตรีมกล้อง %s (capture=%d detect=%d stream=%d fps)",
+            self.camera_id,
+            settings.rates.capture_fps,
+            settings.rates.detect_fps,
+            settings.rates.stream_fps,
+        )
+
+    async def stop(self) -> None:
+        self._stopping = True
+        for task in (self._detect_task, self._stream_task):
+            if task is not None:
+                task.cancel()
+        for task in (self._detect_task, self._stream_task):
+            if task is not None:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._detect_task = None
+        self._stream_task = None
+        logger.info("หยุดตัวขับสตรีมกล้อง %s", self.camera_id)
+
+    # ------------------------------------------------------------------
+    # การสมัครรับภาพ
+    # ------------------------------------------------------------------
+    def subscribe(self) -> asyncio.Queue:
+        """ขอคิวรับภาพหนึ่งอัน สำหรับผู้ชมหนึ่งคน"""
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self._subscribers.add(queue)
+        logger.info(
+            "มีผู้ชมเข้าดูกล้อง %s (รวม %d คน)", self.camera_id, len(self._subscribers)
+        )
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue) -> None:
+        self._subscribers.discard(queue)
+        logger.info(
+            "ผู้ชมออกจากกล้อง %s (เหลือ %d คน)", self.camera_id, len(self._subscribers)
+        )
+
+    @property
+    def viewer_count(self) -> int:
+        return len(self._subscribers)
+
+    # ------------------------------------------------------------------
+    # ลูปตรวจจับ (ช้า)
+    # ------------------------------------------------------------------
+    async def _detect_loop(self) -> None:
+        """ตรวจจับ+จดจำใบหน้าที่อัตรา DETECT_FPS
+
+        ทำงานแยกจากการส่งภาพโดยสิ้นเชิง ถ้าลูปนี้ช้าลง ภาพที่หน้าเว็บ
+        ก็ยังลื่นเท่าเดิม แค่กรอบจะอัปเดตห่างขึ้นเท่านั้น
+        """
+        interval = 1.0 / max(1, settings.rates.detect_fps)
+        last_frame_id = -1
+
+        while not self._stopping:
+            started = time.monotonic()
+
+            try:
+                frame = self.source.read()
+
+                # ตรวจเฉพาะเฟรมใหม่ ถ้ายังเป็นเฟรมเดิมก็ไม่ต้องเสียแรงตรวจซ้ำ
+                if frame is not None and frame.frame_id != last_frame_id:
+                    last_frame_id = frame.frame_id
+
+                    # งานหนัก - ต้องอยู่ใน thread แยก ไม่งั้นบล็อก event loop
+                    # ทำให้การส่งภาพและ request อื่น ๆ ค้างตามไปด้วย
+                    result = await asyncio.to_thread(self.pipeline.process, frame)
+
+                    self._latest_detection = DetectionSnapshot(
+                        frame_id=result.frame_id,
+                        tracks=tracks_to_dicts(result.tracks),
+                        detected_count=result.detected_count,
+                        source_size=result.source_size,
+                        detect_ms=result.detect_ms,
+                        track_ms=result.track_ms,
+                        identify_ms=result.identify_ms,
+                        created_at=time.monotonic(),
+                    )
+                    self._frames_since_detection = 0
+                    self.detect_meter.tick()
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - ลูปนี้ต้องไม่ตายกลางคัน
+                logger.exception("ลูปตรวจจับของกล้อง %s ผิดพลาด: %s", self.camera_id, exc)
+
+            # หน่วงให้ครบรอบ โดยหักเวลาที่ใช้ไปแล้วออก
+            elapsed = time.monotonic() - started
+            await asyncio.sleep(max(0.0, interval - elapsed))
+
+    # ------------------------------------------------------------------
+    # ลูปส่งภาพ (เร็ว)
+    # ------------------------------------------------------------------
+    async def _stream_loop(self) -> None:
+        """เข้ารหัสภาพเป็น JPEG แล้วส่งให้ผู้ชมทุกคน ที่อัตรา STREAM_FPS"""
+        import cv2
+
+        interval = 1.0 / max(1, settings.rates.stream_fps)
+        quality = int(settings.stream.jpeg_quality * 100)
+        last_frame_id = -1
+
+        # ตัวคุมอัตราแบบ token bucket ด้วยเหตุผลเดียวกับใน frame_source
+        # (เฟรมมาเป็นช่อ ถ้าวัดระยะห่างตรง ๆ จะทิ้งเฟรมทั้งที่อัตราเฉลี่ยยังไม่เกิน)
+        stream_fps = max(1, settings.rates.stream_fps)
+        burst_size = 2.0
+        tokens = burst_size
+        last_token_at = time.monotonic()
+
+        # ตรวจดูเฟรมใหม่ถี่กว่าอัตราที่จะส่งจริง แล้วส่งทันทีที่มีของใหม่
+        #
+        # ถ้าหลับครบรอบเต็มแล้วค่อยตื่นมาดู จังหวะจะชนกับจังหวะที่เฟรมมาถึงพอดี
+        # (aliasing) ทำให้พลาดเฟรมแล้วต้องรออีกรอบ ได้จริงเหลือครึ่งเดียว
+        poll_interval = interval / 4.0
+
+        def encode(image) -> bytes | None:
+            ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            return buffer.tobytes() if ok else None
+
+        while not self._stopping:
+            try:
+                # ไม่มีคนดูก็ไม่ต้องเข้ารหัสภาพให้เปลืองเครื่อง
+                # (ลูปตรวจจับยังเดินอยู่ เพราะระบบต้องรู้ว่ามีใครเดินผ่านแม้ไม่มีคนเฝ้าดู)
+                if self._subscribers:
+                    frame = self.source.read()
+                    now = time.monotonic()
+
+                    tokens = min(burst_size, tokens + (now - last_token_at) * stream_fps)
+                    last_token_at = now
+
+                    is_new = frame is not None and frame.frame_id != last_frame_id
+
+                    if is_new and tokens >= 1.0:
+                        last_frame_id = frame.frame_id
+                        tokens -= 1.0
+                        self.capture_meter.tick()
+
+                        # งานเข้ารหัสก็หนักพอควร แยก thread เช่นกัน
+                        # และต้องไม่ไปบล็อกลูปตรวจจับที่เดินคู่ขนานอยู่
+                        jpeg = await asyncio.to_thread(encode, frame.image)
+
+                        if jpeg is not None:
+                            self._publish(frame, jpeg)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("ลูปส่งภาพของกล้อง %s ผิดพลาด: %s", self.camera_id, exc)
+
+            await asyncio.sleep(poll_interval)
+
+    def _publish(self, frame, jpeg: bytes) -> None:
+        """ประกอบข้อความแล้วหย่อนลงคิวของผู้ชมทุกคน"""
+        self._stream_frame_id += 1
+        self._frames_since_detection += 1
+
+        detection = self._latest_detection
+
+        # is_fresh = ผลตรวจชุดนี้เพิ่งได้มาในรอบนี้หรือเปล่า
+        # หน้าเว็บจะรับผลใหม่เฉพาะตอน is_fresh=true
+        # ระหว่างนั้นจะ interpolate กรอบต่อไปเองโดยไม่กระตุก
+        is_fresh = detection is not None and self._frames_since_detection <= 1
+
+        # ผลเก่าเกินไปแล้ว บอกหน้าเว็บให้ค่อย ๆ จางกรอบลง
+        # เพื่อสื่อว่า "กำลังเดาตำแหน่งอยู่" ไม่ใช่ผลสด
+        is_stale = (
+            detection is None
+            or self._frames_since_detection > settings.rates.stale_after_frames
+        )
+
+        meta: dict[str, Any] = {
+            "type": "frame",
+            "camera": self.camera_id,
+            "frame_id": self._stream_frame_id,
+            "is_fresh": is_fresh,
+            "is_stale": is_stale,
+            "frames_since_detection": self._frames_since_detection,
+            "frame_age_ms": round((time.monotonic() - frame.received_at) * 1000, 1),
+            # อัตราที่ "วัดได้จริง" ของทั้งสามขั้น ไม่ใช่ค่าที่ตั้งไว้
+            "fps": {
+                "capture": round(self.capture_meter.fps, 1),
+                "detect": round(self.detect_meter.fps, 1),
+                "stream": round(self.stream_meter.fps, 1),
+            },
+            "viewers": len(self._subscribers),
+        }
+
+        if detection is not None:
+            meta.update({
+                "detections_frame_id": detection.frame_id,
+                "tracks": detection.tracks,
+                "detected_count": detection.detected_count,
+                "source_size": list(detection.source_size),
+                "detect_ms": round(detection.detect_ms, 1),
+                "track_ms": round(detection.track_ms, 2),
+                "identify_ms": round(detection.identify_ms, 1),
+                "detection_age_ms": round((time.monotonic() - detection.created_at) * 1000, 1),
+            })
+        else:
+            # ยังไม่เคยตรวจได้เลย - ส่งภาพไปก่อน หน้าเว็บจะได้ไม่ต้องรอ
+            meta.update({
+                "detections_frame_id": None,
+                "tracks": [],
+                "detected_count": 0,
+                "source_size": list(frame.size),
+            })
+
+        message = encode_stream_message(meta, jpeg)
+        self.stream_meter.tick()
+
+        for queue in list(self._subscribers):
+            # คิวเต็มแปลว่าผู้ชมคนนั้นรับไม่ทัน ให้ทิ้งเฟรมเก่าแล้วใส่ตัวใหม่แทน
+            # ผู้ชมที่เน็ตช้าจะได้ภาพกระโดดบ้าง แต่จะไม่ค่อย ๆ ช้ากว่าความจริงเรื่อย ๆ
+            # และที่สำคัญคือไม่ไปถ่วงผู้ชมคนอื่น
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                pass
+
+    # ------------------------------------------------------------------
+    # สถานะ
+    # ------------------------------------------------------------------
+    def status(self) -> dict[str, Any]:
+        return {
+            "camera": self.camera_id,
+            "viewers": len(self._subscribers),
+            "configured_fps": {
+                "capture": settings.rates.capture_fps,
+                "detect": settings.rates.detect_fps,
+                "stream": settings.rates.stream_fps,
+            },
+            "measured_fps": {
+                "capture": round(self.capture_meter.fps, 1),
+                "detect": round(self.detect_meter.fps, 1),
+                "stream": round(self.stream_meter.fps, 1),
+            },
+            "processed_frames": self.pipeline.processed_frames,
+        }

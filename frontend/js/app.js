@@ -56,6 +56,10 @@ const MIN_HITS_TO_DRAW = 2;
 // ความจางของกรอบที่กำลัง "ค้างไว้" เพราะหาใบหน้าไม่เจอชั่วคราว
 const FADED_ALPHA = 0.35;
 
+// ความจางของกรอบ "ทั้งหมด" เมื่อผลตรวจเก่าเกิน STALE_AFTER_FRAMES (เฟส 7)
+// สื่อว่าตำแหน่งที่เห็นเป็นการเดาต่อจากผลเดิม ไม่ใช่ผลสด
+const STALE_ALPHA = 0.55;
+
 // ---------------------------------------------------------------------------
 // ตัวช่วยอ้างอิง element
 // ---------------------------------------------------------------------------
@@ -76,6 +80,8 @@ const el = {
   streamCanvas: byId('stream-canvas'),
   statLatency: byId('stat-latency'),
   statLatencyBox: byId('stat-latency-box'),
+  statRates: byId('stat-rates'),
+  statRatesBox: byId('stat-rates-box'),
 
   videoBox: byId('video-box'),
   video: byId('video'),
@@ -164,6 +170,11 @@ const render = {
 
   // นับอัตราการวาดจริง เพื่อยืนยันว่าวาดทุกเฟรมของจอจริง ไม่ใช่วาดเฉพาะตอนได้ผลใหม่
   tickTimestamps: [],
+
+  // ตัวคูณความทึบรวม ใช้ตอนผลตรวจเก่าเกินไป (เฟส 7)
+  // แยกจาก alpha ของแต่ละกรอบ เพื่อไม่ให้ค่าเพี้ยนสะสม
+  staleFactor: 1,
+  staleTarget: 1,
 };
 
 // ---------------------------------------------------------------------------
@@ -840,6 +851,9 @@ function renderTick(now) {
 
   const k = smoothingFactor(dt);
 
+  // ไหลตัวคูณความจาง (ผลตรวจเก่า) เข้าหาเป้าหมายอย่างนุ่มนวลเช่นกัน
+  render.staleFactor = lerp(render.staleFactor, render.staleTarget, k);
+
   // ไหลทุกกรอบเข้าหาเป้าหมาย แล้วเก็บกวาดตัวที่จางจนมองไม่เห็นแล้ว
   render.boxes.forEach((entry, trackId) => {
     entry.current.x = lerp(entry.current.x, entry.target.x, k);
@@ -899,7 +913,9 @@ function drawBoxes() {
   ctx.lineJoin = 'round';
 
   render.boxes.forEach((entry) => {
-    if (entry.alpha < 0.02) return;
+    // ความทึบสุดท้าย = ความทึบของกรอบนั้น คูณด้วยตัวคูณรวมตอนผลตรวจเก่า
+    const alpha = entry.alpha * render.staleFactor;
+    if (alpha < 0.02) return;
 
     const c = entry.current;
 
@@ -912,7 +928,7 @@ function drawBoxes() {
 
     const color = BOX_COLORS[entry.identityState] || BOX_COLORS.pending;
 
-    ctx.globalAlpha = entry.alpha;
+    ctx.globalAlpha = alpha;
     ctx.strokeStyle = color;
     ctx.strokeRect(x, y, w, h);
 
@@ -1209,21 +1225,59 @@ async function handleStreamFrame(buffer) {
   rtsp.ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
 
-  // ---- อัปเดตกรอบและตัวเลขสถานะ ----
+  // ---- อัปเดตตัวเลขสถานะ (ทำทุกเฟรม เพราะภาพเปลี่ยนทุกเฟรม) ----
   detection.lastSourceSize = meta.source_size || null;
 
-  const tracks = meta.tracks || [];
-  const knownCount = tracks.filter((t) => t.identity_state === 'recognized').length;
-
   setText(el.statSentSize, meta.source_size ? meta.source_size[0] + ' × ' + meta.source_size[1] : null);
-  setText(el.statProcess, meta.detect_ms + ' ms (ตรวจ ' + meta.detect_ms + ' + จดจำ ' + meta.identify_ms + ')');
-  setText(el.statFaces, meta.detected_count + ' คน');
-  setText(el.statTracks, tracks.length + ' track');
-  setText(el.statKnown, knownCount + ' / ' + tracks.length + ' คน');
   setText(el.statLatency, meta.frame_age_ms + ' ms');
 
+  // อัตราสามค่าที่วัดได้จริง (เฟส 7) - ดูได้ทันทีว่าขั้นไหนเป็นคอขวด
+  if (meta.fps) {
+    el.statRatesBox.hidden = false;
+    setText(el.statRates, meta.fps.capture + ' / ' + meta.fps.detect + ' / ' + meta.fps.stream);
+  }
+
   recordStreamFrame();
-  updateRenderTargets(tracks);
+
+  // ---- อัปเดตกรอบ "เฉพาะตอนได้ผลตรวจชุดใหม่" (หัวใจของเฟส 7) ----
+  //
+  // ภาพมาที่ STREAM_FPS (เช่น 15) แต่ผลตรวจมาที่ DETECT_FPS (เช่น 5)
+  // เฟรมส่วนใหญ่จึงแนบผลชุดเดิมมาด้วย (is_fresh=false)
+  //
+  // ถ้าเอาผลเดิมมา updateRenderTargets ซ้ำทุกเฟรม กรอบจะไม่เสียหายอะไร
+  // แต่เปลืองเปล่า ๆ และทำให้ตัวเลข "โหวต" กระพริบ
+  // ช่วงที่ไม่มีผลใหม่ วงวาดด้วย requestAnimationFrame จะ interpolate ต่อเอง
+  // ซึ่งเป็นกลไกที่ทำไว้ตั้งแต่เฟส 3 อยู่แล้ว
+  if (meta.is_fresh) {
+    const tracks = meta.tracks || [];
+    const knownCount = tracks.filter((t) => t.identity_state === 'recognized').length;
+
+    setText(el.statProcess, (meta.detect_ms + meta.identify_ms).toFixed(1) +
+      ' ms (ตรวจ ' + meta.detect_ms + ' + จดจำ ' + meta.identify_ms + ')');
+    setText(el.statFaces, meta.detected_count + ' คน');
+    setText(el.statTracks, tracks.length + ' track');
+    setText(el.statKnown, knownCount + ' / ' + tracks.length + ' คน');
+
+    updateRenderTargets(tracks);
+  }
+
+  // ---- ผลตรวจเก่าเกินไป: ค่อย ๆ จางกรอบลง ----
+  // สื่อให้ผู้ใช้รู้ว่าตำแหน่งที่เห็นเป็นการเดาต่อ ไม่ใช่ผลสด
+  // (เช่นตอน AI ช้าลงเพราะคนเยอะ หรือ DETECT_FPS ถูกตั้งไว้ต่ำมาก)
+  setStaleFade(Boolean(meta.is_stale));
+}
+
+/**
+ * ตั้งเป้าหมายความจางของกรอบทั้งหมด เมื่อผลตรวจเก่าเกินไป
+ *
+ * ใช้เป็น "ตัวคูณรวม" แยกต่างหาก ไม่ไปแก้ targetAlpha ของแต่ละกรอบ
+ * เพราะค่านั้นเป็นของระบบจดจำใบหน้า (กรอบที่ backend ค้างไว้ก็จางอยู่แล้ว)
+ * ถ้าไปคูณทับกัน ค่าจะเพี้ยนสะสมทุกครั้งที่สลับสถานะ
+ *
+ * ตัวคูณนี้จะถูกไล่เข้าหาเป้าหมายทีละนิดในวงวาด จึงจางแบบนุ่มนวลไม่กระตุก
+ */
+function setStaleFade(stale) {
+  render.staleTarget = stale ? STALE_ALPHA : 1;
 }
 
 /** นับ fps ของภาพที่ได้รับจริงจาก backend */
