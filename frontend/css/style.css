@@ -151,6 +151,19 @@ body {
   margin-bottom: 16px;
 }
 
+/* ต้องเขียนกฎนี้ด้วย เพราะ .controls ตั้ง display:flex ซึ่ง specificity สูงกว่ากฎ
+   [hidden]{display:none} ที่เบราว์เซอร์มีมาให้ ถ้าไม่มีบรรทัดนี้
+   การสั่ง element.hidden = true จะไม่มีผล แล้วแถบควบคุมของทั้งสองโหมด
+   (เว็บแคม / กล้อง IP) จะโผล่พร้อมกันทั้งคู่ */
+.controls[hidden] {
+  display: none;
+}
+
+/* เหตุผลเดียวกันกับช่องสถิติที่ซ่อน/แสดงตามโหมด */
+.stat[hidden] {
+  display: none;
+}
+
 .control-group {
   display: flex;
   align-items: center;
