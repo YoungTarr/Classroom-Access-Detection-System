@@ -70,8 +70,11 @@ body {
 /* ---------------------------------------------------------------------------
    เลย์เอาต์หลัก
    --------------------------------------------------------------------------- */
+/* กว้างขึ้นตั้งแต่เฟส 8 เพราะต้องวางจอกล้องสองจอข้างกันให้อ่านออก
+   ถ้ายังคุมไว้ที่ 900px จอแต่ละจอจะเหลือกว้างราว 420px ซึ่งเล็กเกินกว่าจะดูใบหน้าได้
+   ส่วนการ์ดอื่น (สถานะ / รายชื่อ) ก็ยังอ่านสบายที่ความกว้างนี้ */
 .container {
-  max-width: 900px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 24px 16px;
   display: flex;
@@ -220,8 +223,11 @@ body {
 
 /* ---------------------------------------------------------------------------
    พื้นที่แสดงภาพ - ใช้ทีละอย่างตามโหมด
-       <video>         = เว็บแคมของผู้ใช้
-       #stream-canvas  = ภาพจากกล้อง IP ที่ backend push มา
+       <video>      = เว็บแคมของผู้ใช้ (โหมดเว็บแคมเดี่ยว)
+       .cam__stream = ภาพที่ backend push มา (โหมดกล้องหลายตัว จอละอัน)
+
+   ใช้ "คลาส" ไม่ใช่ id ตั้งแต่เฟส 8 เพราะมีหลายจอบนหน้าเดียวกัน
+   ถ้ายังใช้ id จะซ้ำกันทันทีเมื่อมีกล้องสองตัว
 
    ทั้งสองวางทับกล่องเต็มพื้นที่แล้วใช้ object-fit: contain
    contain = ย่อภาพให้เห็น "ทั้งเฟรม" เสมอ ไม่ตัดอะไรทิ้ง
@@ -231,7 +237,7 @@ body {
    ซึ่งทำให้มองไม่เห็นพื้นที่บางส่วนที่กล้องเห็นจริง
    --------------------------------------------------------------------------- */
 .video-box video,
-.video-box #stream-canvas {
+.video-box .cam__stream {
   position: absolute;
   inset: 0;
   display: block;
@@ -243,7 +249,7 @@ body {
 /* ต้องเขียนกฎนี้ด้วยเพราะกฎด้านบนตั้ง display:block ซึ่งชนะ [hidden] ของเบราว์เซอร์
    (ปัญหาเดียวกับ .video-box__idle) ถ้าไม่มี การสั่ง hidden จะไม่มีผล */
 .video-box video[hidden],
-.video-box #stream-canvas[hidden] {
+.video-box .cam__stream[hidden] {
   display: none;
 }
 
@@ -261,11 +267,13 @@ body {
    การให้ canvas ครอบทั้งกล่องทำให้ระบบพิกัดมีจุดเริ่มเดียวชัดเจน
    แล้วค่อยบวก offset ของแถบว่างเข้าไปตอนคำนวณ (ทำที่ getFrameTransform ที่เดียว)
 
-   !! ระวัง !! ต้องเจาะจง #overlay ไม่ใช่เขียนกว้าง ๆ ว่า .video-box canvas
-   เพราะจะไปโดน #stream-canvas ด้วย ทำให้ภาพหลุดออกจาก flow
-   แล้วกล่องไม่ขยายตามภาพ จนภาพถูก overflow:hidden ตัดขอบบน-ล่างทิ้ง
+   !! ระวัง !! ต้องเจาะจงเฉพาะ canvas ที่วาดกรอบ ไม่ใช่เขียนกว้าง ๆ
+   ว่า .video-box canvas เพราะจะไปโดน canvas ที่แสดงภาพด้วย
+   ทำให้ภาพหลุดออกจาก flow แล้วกล่องไม่ขยายตามภาพ
+   จนภาพถูก overflow:hidden ตัดขอบบน-ล่างทิ้ง
    --------------------------------------------------------------------------- */
-.video-box #overlay {
+.video-box #overlay,
+.video-box .cam__overlay {
   position: absolute;
   top: 0;
   left: 0;
@@ -501,10 +509,216 @@ body {
   color: var(--text-dim);
 }
 
+/* ===========================================================================
+   เฟส 8: จอกล้องหลายตัวแสดงพร้อมกัน
+   =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+   สรุปรวมทุกกล้อง (อยู่เหนือจอกล้อง)
+   --------------------------------------------------------------------------- */
+.summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  margin-bottom: var(--gap);
+  padding: 12px 14px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.summary__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.summary__label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.summary__value {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.summary__value--ok    { color: var(--ok); }
+.summary__value--warn  { color: var(--warn); }
+.summary__value--error { color: var(--error); }
+
+/* คำอธิบายสั้น ๆ ข้างปุ่มในแถบควบคุม */
+.controls__hint {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* ---------------------------------------------------------------------------
+   ตะแกรงจอกล้อง
+
+   auto-fit + minmax คือหัวใจของข้อ 8:
+     จอกว้างพอ  -> เรียงข้างกันสองคอลัมน์ (หรือมากกว่าถ้ามีกล้องเพิ่ม)
+     จอแคบ/มือถือ -> ยุบเหลือคอลัมน์เดียว ซ้อนกันลงมาเอง
+
+   ไม่ได้เขียน grid-template-columns: 1fr 1fr ตายตัว เพราะจำนวนกล้อง
+   มาจาก .env ถ้ามีกล้องตัวเดียวจะได้เต็มความกว้าง และถ้าเพิ่มเป็นสามตัว
+   ก็จัดให้เองโดยไม่ต้องแก้ CSS
+   --------------------------------------------------------------------------- */
+.camera-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: var(--gap);
+  align-items: start;
+}
+
+/* ---------------------------------------------------------------------------
+   จอกล้องหนึ่งตัว
+   --------------------------------------------------------------------------- */
+.cam {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  background: var(--bg);
+  min-width: 0;   /* ให้ย่อได้จริงใน grid ไม่งั้นเนื้อหาจะดันคอลัมน์ให้ล้น */
+}
+
+.cam__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.cam__titles {
+  min-width: 0;
+}
+
+/* ป้ายทิศทางเป็นตัวหลัก เพราะต้องดูออกทันทีว่าจอไหนคือขาเข้า/ขาออก */
+.cam__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.cam__subtitle {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.cam__state {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.cam__state-text {
+  color: var(--text-dim);
+}
+
+/* อยู่ "ใต้" กล่องภาพ เพื่อให้ภาพของทุกจอเริ่มที่ความสูงเดียวกัน
+   (จอกล้อง IP ไม่มีแถบนี้ ส่วนจอเว็บแคมมี ถ้าวางไว้ด้านบนภาพจะเหลื่อมกัน) */
+.cam__controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+/* .cam__controls ตั้ง display:flex ซึ่งชนะ [hidden] ของเบราว์เซอร์
+   เหตุผลเดียวกับ .controls ด้านบน ต้องเขียนกฎนี้ไม่งั้นซ่อนไม่ลง */
+.cam__controls[hidden] {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   กรอบเทาตอนกล้องตัวนี้หลุด (ข้อ 10)
+
+   วางทับเฉพาะกล่องภาพ "ของจอนี้" เท่านั้น จึงไม่ทำให้ภาพของกล้องอีกตัวหายไป
+   ใช้พื้นทึบเกือบเต็มเพื่อกลบภาพเฟรมสุดท้ายที่ค้างอยู่
+   ไม่งั้นผู้ใช้จะเข้าใจผิดว่ายังเห็นภาพสดอยู่
+   --------------------------------------------------------------------------- */
+.cam__offline {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 16px;
+  text-align: center;
+  background: rgba(20, 24, 33, 0.92);
+  border: 2px solid #4a5468;   /* กรอบเทา บอกว่าจอนี้ไม่ทำงาน */
+  border-radius: var(--radius);
+}
+
+.cam__offline[hidden] {
+  display: none;
+}
+
+.cam__offline-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #c3ccdd;
+}
+
+.cam__offline-reason {
+  margin: 0;
+  font-size: 13px;
+  color: #ffb3b3;
+  max-width: 46ch;
+}
+
+.cam__offline-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  max-width: 46ch;
+}
+
+/* ชุดสถิติในจอกล้องแคบกว่าของการ์ดใหญ่ จึงลดความกว้างขั้นต่ำของช่องลง
+   ไม่งั้นบนจอสองคอลัมน์จะเหลือแค่แถวละสองช่อง แล้วสูงเกินจำเป็น */
+.stats--cam {
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+  gap: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+   สถานะกล้องรายตัวในการ์ด "สถานะการเชื่อมต่อ"
+   --------------------------------------------------------------------------- */
+.cam-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cam-line + .cam-line {
+  margin-top: 4px;
+}
+
 /* ---------------------------------------------------------------------------
    จอเล็ก
    --------------------------------------------------------------------------- */
+
+/* จอที่แคบกว่านี้วางสองคอลัมน์แล้วจะเล็กจนดูใบหน้าไม่ออก
+   บังคับให้ซ้อนกันเป็นคอลัมน์เดียวแทน (ข้อ 8) */
+@media (max-width: 900px) {
+  .camera-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 600px) {
   .detail__row { flex-direction: column; gap: 2px; }
   .detail dt   { min-width: auto; }
+
+  /* จอมือถือ: ลดขอบในของจอกล้องลงเพื่อให้ภาพได้พื้นที่มากที่สุด */
+  .cam { padding: 10px; }
 }

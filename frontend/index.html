@@ -20,16 +20,64 @@
   <main class="container">
 
     <!-- ===================================================================
-         การ์ดกล้อง - เฟส 2
+         การ์ดกล้องหลายตัว - เฟส 8
+
+         แสดงทุกกล้องพร้อมกัน ไม่มี dropdown ให้เลือกทีละตัวแล้ว
+         จอของแต่ละกล้องถูกสร้างด้วย JavaScript (คลาส StreamPanel)
+         เพราะจำนวนกล้องมาจาก .env จึงเขียนตายตัวไว้ใน HTML ไม่ได้
          =================================================================== -->
-    <section class="card">
+    <section class="card" id="mode-cameras" hidden>
       <div class="card__header">
         <h2>กล้องและการตรวจจับใบหน้า</h2>
+        <span class="badge" id="cameras-status">ปิดอยู่</span>
+      </div>
+
+      <div class="controls">
+        <button type="button" class="btn btn--primary" id="btn-cameras">เริ่มดูภาพสดทุกกล้อง</button>
+        <span class="controls__hint" id="cameras-hint"></span>
+      </div>
+
+      <!-- สรุปรวมทุกกล้อง - ต้องอยู่เหนือจอกล้อง เพราะเป็นภาพรวมที่ดูก่อน -->
+      <div class="summary">
+        <div class="summary__item">
+          <span class="summary__label">ใบหน้าที่เจอรวมทุกกล้อง</span>
+          <span class="summary__value" id="summary-faces">—</span>
+        </div>
+        <div class="summary__item">
+          <span class="summary__label">จดจำได้รวม</span>
+          <span class="summary__value" id="summary-known">—</span>
+        </div>
+        <div class="summary__item">
+          <span class="summary__label">กล้องที่ส่งภาพอยู่</span>
+          <span class="summary__value" id="summary-cameras">—</span>
+        </div>
+        <div class="summary__item">
+          <span class="summary__label">สถานะรวมของระบบ</span>
+          <span class="summary__value" id="summary-overall">—</span>
+        </div>
+      </div>
+
+      <!-- จอกล้องทั้งหมด: 2 คอลัมน์บนจอกว้าง / ซ้อนกันบนจอแคบ (กำหนดใน CSS) -->
+      <div class="camera-grid" id="camera-grid"></div>
+
+      <!-- ข้อผิดพลาดระดับ "ทั้งระบบ" เท่านั้น
+           ส่วนปัญหาของกล้องตัวใดตัวหนึ่งไปแสดงในจอของตัวนั้นเอง -->
+      <div class="alert alert--error" id="cameras-error" hidden></div>
+    </section>
+
+    <!-- ===================================================================
+         การ์ดโหมดเว็บแคมเดี่ยว - เฟส 2 (ใช้เมื่อ FRAME_SOURCE=browser)
+
+         เก็บไว้เหมือนเดิมสำหรับพัฒนา/ทดสอบบนเครื่องที่ไม่มีกล้อง IP เลย
+         ต่างจากโหมดด้านบนตรงที่เบราว์เซอร์วาดกรอบเองจากภาพในเครื่อง
+         =================================================================== -->
+    <section class="card" id="mode-webcam" hidden>
+      <div class="card__header">
+        <h2>เว็บแคมและการตรวจจับใบหน้า</h2>
         <span class="badge" id="detect-status">ปิดอยู่</span>
       </div>
 
-      <!-- แถบควบคุมโหมดเว็บแคม (ซ่อนอัตโนมัติเมื่อ FRAME_SOURCE=rtsp) -->
-      <div class="controls" id="controls-webcam">
+      <div class="controls">
         <button type="button" class="btn btn--primary" id="btn-camera">เปิดกล้อง</button>
 
         <label class="control-group">
@@ -40,27 +88,10 @@
         </label>
       </div>
 
-      <!-- แถบควบคุมโหมดกล้อง IP (ซ่อนอัตโนมัติเมื่อ FRAME_SOURCE=browser) -->
-      <div class="controls" id="controls-rtsp" hidden>
-        <button type="button" class="btn btn--primary" id="btn-stream">เริ่มดูภาพสด</button>
-
-        <label class="control-group">
-          <span class="control-group__label">กล้อง IP</span>
-          <select id="rtsp-select" class="select">
-            <option value="">— กำลังโหลดรายชื่อกล้อง —</option>
-          </select>
-        </label>
-      </div>
-
       <!-- กล่องวิดีโอ: <canvas> ที่วาดกรอบต้องซ้อนทับภาพให้พอดีเป๊ะ
-           จึงใช้ position:relative ที่ตัวห่อ แล้ว absolute ที่ canvas
-
-           มีพื้นที่แสดงภาพ 2 แบบ ใช้ทีละแบบตามโหมด:
-             <video>  = เว็บแคมของผู้ใช้ (เบราว์เซอร์เล่นเอง)
-             <canvas> = ภาพจากกล้อง IP ที่ backend push มาทีละเฟรม -->
+           จึงใช้ position:relative ที่ตัวห่อ แล้ว absolute ที่ canvas -->
       <div class="video-box" id="video-box">
         <video id="video" playsinline muted></video>
-        <canvas id="stream-canvas" hidden></canvas>
         <canvas id="overlay"></canvas>
 
         <!-- ข้อความตอนยังไม่เปิดกล้อง -->
@@ -71,7 +102,7 @@
       </div>
 
       <!-- ตัวเลขสถานะแบบเรียลไทม์ -->
-      <div class="stats" id="stats">
+      <div class="stats">
         <div class="stat">
           <span class="stat__label">ความละเอียดกล้อง</span>
           <span class="stat__value" id="stat-resolution">—</span>
@@ -83,18 +114,6 @@
         <div class="stat">
           <span class="stat__label">FPS ที่ส่งจริง</span>
           <span class="stat__value" id="stat-fps">—</span>
-        </div>
-        <!-- เฟส 7: อัตราสามค่าที่ "วัดได้จริง" ไม่ใช่ค่าที่ตั้งไว้ใน .env
-             แสดงแยกกันเพื่อให้เห็นว่าขั้นไหนเป็นคอขวด -->
-        <div class="stat" id="stat-rates-box" hidden>
-          <span class="stat__label">อ่านกล้อง / ตรวจจับ / ส่งภาพ</span>
-          <span class="stat__value" id="stat-rates">—</span>
-        </div>
-        <!-- อายุของเฟรมตอนถึงหน้าจอ - ตัวเลขนี้ต้องไม่ไต่ขึ้นเรื่อย ๆ
-             ถ้าไต่ขึ้นแปลว่ามีคิวเฟรมสะสมอยู่ที่ไหนสักแห่ง -->
-        <div class="stat" id="stat-latency-box" hidden>
-          <span class="stat__label">อายุเฟรม (latency)</span>
-          <span class="stat__value" id="stat-latency">—</span>
         </div>
         <div class="stat">
           <span class="stat__label">เวลาตรวจจับ</span>
@@ -166,6 +185,12 @@
           <dt>แหล่งภาพ</dt>
           <dd id="health-frame-source">—</dd>
         </div>
+        <!-- สถานะกล้องแต่ละตัวแยกกัน (เฟส 8)
+             ต้องดูออกจากหน้านี้ว่ากล้องตัวไหนหลุด โดยไม่ต้องเปิดดูภาพ -->
+        <div class="detail__row" id="health-cameras-row" hidden>
+          <dt>กล้องแต่ละตัว</dt>
+          <dd id="health-cameras">—</dd>
+        </div>
         <!-- กรอบอ้างอิงของทิศทาง - แสดงไว้เพราะ "ซ้าย" บนจอกับในโลกจริง
              กลับด้านกันเมื่อภาพถูกพลิกกระจก ต้องรู้ว่ากำลังใช้แบบไหนอยู่ -->
         <div class="detail__row">
@@ -225,8 +250,16 @@
     <span id="footer-version">—</span>
   </footer>
 
-  <!-- camera.js ต้องมาก่อน app.js เพราะ app.js ใช้คลาส CameraController -->
+  <!-- ลำดับของสคริปต์สำคัญ เพราะไฟล์หลังใช้คลาสที่ประกาศในไฟล์ก่อนหน้า
+         camera.js        -> CameraController  (เปิดเว็บแคม + จับภาพเป็น JPEG)
+         overlay.js       -> FaceOverlay       (วาดกรอบทับภาพหนึ่งภาพ)
+         stream-panel.js  -> StreamPanel       (จอกล้องหนึ่งตัว ใช้ FaceOverlay)
+         webcam-feeder.js -> WebcamFeeder      (ส่งเว็บแคมขึ้นไปเป็นกล้องตัวหนึ่ง)
+         app.js           -> ประกอบทุกอย่างเข้าด้วยกัน -->
   <script src="js/camera.js"></script>
+  <script src="js/overlay.js"></script>
+  <script src="js/stream-panel.js"></script>
+  <script src="js/webcam-feeder.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

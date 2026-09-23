@@ -3,6 +3,34 @@
 
    เฟส 1: สถานะการเชื่อมต่อฐานข้อมูล + ตารางรายชื่อสมาชิก
    เฟส 2: เปิดเว็บแคม ส่งเฟรมไปตรวจจับใบหน้า แล้ววาดกรอบทับภาพ
+   เฟส 3-5: กรอบไหลลื่น + จดจำว่าเป็นใคร + ทิศทางการเคลื่อนที่
+   เฟส 6-7: รับภาพจากกล้อง IP + แยกอัตรา fps สามค่า
+   เฟส 8: แสดงกล้องหลายตัวพร้อมกัน (ขาเข้า / ขาออก)
+
+   ============================================================================
+   ไฟล์นี้ทำหน้าที่ "ประกอบ" อย่างเดียว
+   ============================================================================
+
+   ตรรกะหนัก ๆ ถูกแยกออกไปเป็นคลาสที่สร้างซ้ำได้ เพราะเฟส 8 ต้องมีหลายจอ:
+
+       overlay.js       FaceOverlay    วาดกรอบทับภาพหนึ่งภาพ
+       stream-panel.js  StreamPanel    จอกล้องหนึ่งตัว (DOM + WebSocket + สถิติ)
+       webcam-feeder.js WebcamFeeder   ส่งเว็บแคมขึ้นไปเป็นกล้องตัวหนึ่ง
+       camera.js        CameraController  เปิดเว็บแคม + จับภาพเป็น JPEG
+
+   ไฟล์นี้จึงเหลือแค่: โหลด config -> เลือกโหมด -> สร้างจอ -> สถานะระบบ -> รายชื่อ
+
+   ============================================================================
+   สองโหมดที่ต่างกันโดยสิ้นเชิง
+   ============================================================================
+
+   โหมดกล้องหลายตัว (FRAME_SOURCE=rtsp)  <- โหมดที่ใช้งานจริง
+       backend ต่อกล้องเอง ตรวจเสร็จแล้ว push ภาพ+ผล มาให้หน้าเว็บ
+       หน้าเว็บสร้างจอหนึ่งจอต่อกล้องหนึ่งตัว แล้วแสดงพร้อมกันทั้งหมด
+       กล้องตัวไหนที่ตั้ง SOURCE=browser หน้าเว็บจะเปิดเว็บแคมป้อนขึ้นไปให้ด้วย
+
+   โหมดเว็บแคมเดี่ยว (FRAME_SOURCE=browser)  <- ไว้พัฒนา/ทดสอบ
+       เบราว์เซอร์จับภาพเอง ส่งไปตรวจ แล้ววาดกรอบทับ <video> ในเครื่อง
 
    สำคัญ: เรียก API ด้วย path สัมพัทธ์ "/api/..." และ "/ws/..." เสมอ
    ห้ามเขียน http://localhost:8000 ตรง ๆ เพราะ
@@ -20,6 +48,7 @@ const API = {
   health: '/api/health',
   members: '/api/members',
   config: '/api/config',
+  cameras: '/api/cameras',
 };
 
 // ตรวจสถานะซ้ำอัตโนมัติทุก 15 วินาที เพื่อให้เห็นทันทีเมื่อ backend/DB ล่มหรือกลับมา
@@ -29,36 +58,11 @@ const AUTO_REFRESH_MS = 15000;
    ตั้งใจให้เป็นค่าที่ "ทำงานได้แต่ไม่เงียบ" คือถ้าโหลด config ไม่ได้
    จะมีข้อความแจ้งเตือนขึ้นเสมอ ไม่ใช่แอบใช้ค่าพวกนี้แล้วเงียบไป */
 const CONFIG_FALLBACK = {
-  stream: { target_width: 640, send_fps: 10, jpeg_quality: 0.7, mirror: true },
+  stream: { source: 'browser', target_width: 640, send_fps: 10, jpeg_quality: 0.7, mirror: true },
   face: { det_thresh: 0.5, model_pack: '—' },
   tracking: { smoothing: 0.35, max_missing: 3 },
   direction: { reference: 'world', min_shift_ratio: 0.025, frame_gap: 8 },
 };
-
-/* สีกรอบตามผลการจดจำ (เฟส 4)
-   เขียว = รู้ว่าเป็นใคร / แดง = ไม่ใช่คนในระบบ / น้ำเงิน = กำลังตรวจสอบอยู่
-
-   ที่ต้องมีสีน้ำเงินด้วย เพราะ "ยังตรวจไม่เสร็จ" กับ "ตรวจแล้วไม่รู้จัก"
-   เป็นคนละเรื่องกัน ถ้าใช้สีแดงทั้งคู่ ทุกคนที่เดินเข้ามาจะเห็นกรอบแดง
-   แวบหนึ่งก่อนเปลี่ยนเป็นเขียวเสมอ ซึ่งสะดุดตาและทำให้เข้าใจผิด */
-const BOX_COLORS = {
-  recognized: '#3ecf8e',
-  unknown: '#ff5c5c',
-  pending: '#4c8dff',
-};
-
-const BOX_LINE_WIDTH = 3;
-
-// จำนวนเฟรมที่ต้องเจอติดกันก่อนจะเริ่มวาดกรอบ
-// กันสัญญาณรบกวนที่ตัวตรวจจับเจอแวบเดียวแล้วหายไป ไม่ให้กรอบผุดขึ้นมาแวบหนึ่ง
-const MIN_HITS_TO_DRAW = 2;
-
-// ความจางของกรอบที่กำลัง "ค้างไว้" เพราะหาใบหน้าไม่เจอชั่วคราว
-const FADED_ALPHA = 0.35;
-
-// ความจางของกรอบ "ทั้งหมด" เมื่อผลตรวจเก่าเกิน STALE_AFTER_FRAMES (เฟส 7)
-// สื่อว่าตำแหน่งที่เห็นเป็นการเดาต่อจากผลเดิม ไม่ใช่ผลสด
-const STALE_ALPHA = 0.55;
 
 // ---------------------------------------------------------------------------
 // ตัวช่วยอ้างอิง element
@@ -68,21 +72,22 @@ const byId = (id) => document.getElementById(id);
 const el = {
   phaseBadge: byId('phase-badge'),
 
-  // กล้อง (เว็บแคม)
-  controlsWebcam: byId('controls-webcam'),
+  // ---- โหมดกล้องหลายตัว (เฟส 8) ----
+  modeCameras: byId('mode-cameras'),
+  camerasStatus: byId('cameras-status'),
+  btnCameras: byId('btn-cameras'),
+  camerasHint: byId('cameras-hint'),
+  cameraGrid: byId('camera-grid'),
+  camerasError: byId('cameras-error'),
+  summaryFaces: byId('summary-faces'),
+  summaryKnown: byId('summary-known'),
+  summaryCameras: byId('summary-cameras'),
+  summaryOverall: byId('summary-overall'),
+
+  // ---- โหมดเว็บแคมเดี่ยว (เฟส 2) ----
+  modeWebcam: byId('mode-webcam'),
   btnCamera: byId('btn-camera'),
   cameraSelect: byId('camera-select'),
-
-  // กล้อง IP (เฟส 6)
-  controlsRtsp: byId('controls-rtsp'),
-  btnStream: byId('btn-stream'),
-  rtspSelect: byId('rtsp-select'),
-  streamCanvas: byId('stream-canvas'),
-  statLatency: byId('stat-latency'),
-  statLatencyBox: byId('stat-latency-box'),
-  statRates: byId('stat-rates'),
-  statRatesBox: byId('stat-rates-box'),
-
   videoBox: byId('video-box'),
   video: byId('video'),
   overlay: byId('overlay'),
@@ -91,8 +96,6 @@ const el = {
   videoIdleHint: byId('video-idle-hint'),
   cameraError: byId('camera-error'),
   detectStatus: byId('detect-status'),
-
-  // ตัวเลขสถานะ
   statResolution: byId('stat-resolution'),
   statSentSize: byId('stat-sent-size'),
   statFps: byId('stat-fps'),
@@ -103,7 +106,7 @@ const el = {
   statRenderFps: byId('stat-render-fps'),
   statDropped: byId('stat-dropped'),
 
-  // สถานะระบบ
+  // ---- สถานะระบบ ----
   btnRefresh: byId('btn-refresh'),
   statusDot: byId('status-dot'),
   statusText: byId('status-text'),
@@ -114,13 +117,15 @@ const el = {
   faceModel: byId('health-face-model'),
   identifyInfo: byId('health-identify'),
   frameSource: byId('health-frame-source'),
+  healthCamerasRow: byId('health-cameras-row'),
+  healthCameras: byId('health-cameras'),
   directionInfo: byId('health-direction'),
   btnReloadFaces: byId('btn-reload-faces'),
   reloadResult: byId('reload-result'),
   serverTime: byId('health-server-time'),
   healthError: byId('health-error'),
 
-  // สมาชิก
+  // ---- สมาชิก ----
   memberCount: byId('member-count'),
   memberTbody: byId('member-tbody'),
   footerVersion: byId('footer-version'),
@@ -131,51 +136,8 @@ const el = {
 // ---------------------------------------------------------------------------
 let config = CONFIG_FALLBACK;
 
-const camera = new CameraController(el.video);
-
-/** สถานะการตรวจจับทั้งหมดรวมไว้ที่เดียว อ่านง่ายกว่าตัวแปรลอย ๆ กระจัดกระจาย */
-const detection = {
-  socket: null,          // WebSocket
-  running: false,        // กำลังส่งเฟรมอยู่หรือไม่
-  frameId: 0,            // เลขลำดับเฟรมที่จะส่งครั้งถัดไป
-  awaitingResult: false, // ส่งไปแล้วยังไม่ได้ผลกลับ (ใช้ทำ backpressure)
-  sendTimer: null,
-  lastSentAt: 0,         // performance.now() ตอนส่งเฟรมล่าสุด
-  watchdogTimer: null,   // กันค้างถ้า backend ไม่ตอบกลับมาเลย
-
-  // ผลล่าสุดที่ได้จาก backend
-  lastSourceSize: null,  // ขนาดของภาพที่ส่งไปตรวจ [w, h]
-
-  // สถิติ
-  sentTimestamps: [],    // เวลาที่ส่งแต่ละเฟรม ใช้คำนวณ fps จริง
-  droppedFrames: 0,
-  lastProcessMs: null,
-};
-
-/* ---------------------------------------------------------------------------
-   สถานะการวาดกรอบ (เฟส 3)
-
-   แยกออกจาก detection โดยตั้งใจ เพราะสองอย่างนี้เดินคนละจังหวะกัน:
-     - detection เดินตามผลจาก backend  (~8-10 ครั้ง/วินาที)
-     - การวาดเดินตามจังหวะรีเฟรชของจอ (~60 ครั้ง/วินาที)
-
-   กรอบแต่ละอันจึงมีทั้ง "ตำแหน่งเป้าหมาย" (ผลล่าสุดจาก backend)
-   และ "ตำแหน่งที่วาดอยู่จริง" ซึ่งค่อย ๆ ไหลเข้าหาเป้าหมายทุกเฟรมของจอ
-   --------------------------------------------------------------------------- */
-const render = {
-  // Map: track_id -> { current, target, score, hits, visible, missing, alpha, targetAlpha, dead }
-  boxes: new Map(),
-  rafId: null,
-  lastTickAt: 0,
-
-  // นับอัตราการวาดจริง เพื่อยืนยันว่าวาดทุกเฟรมของจอจริง ไม่ใช่วาดเฉพาะตอนได้ผลใหม่
-  tickTimestamps: [],
-
-  // ตัวคูณความทึบรวม ใช้ตอนผลตรวจเก่าเกินไป (เฟส 7)
-  // แยกจาก alpha ของแต่ละกรอบ เพื่อไม่ให้ค่าเพี้ยนสะสม
-  staleFactor: 1,
-  staleTarget: 1,
-};
+/** ส่งให้คลาสต่าง ๆ ใช้อ่าน config โดยไม่ต้องรู้ว่าเก็บไว้ที่ตัวแปรไหน */
+const getConfig = () => config;
 
 // ---------------------------------------------------------------------------
 // ตัวช่วยทั่วไป
@@ -212,6 +174,17 @@ function formatTime(isoString) {
   return d.toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'medium' });
 }
 
+/** ประกอบ URL ของ WebSocket จาก origin ปัจจุบัน (http -> ws, https -> wss) */
+function buildDetectSocketUrl() {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return protocol + '//' + window.location.host + '/ws/detect';
+}
+
+/** ตอนนี้ backend อยู่ในโหมดกล้องหลายตัวหรือไม่ */
+function isCameraMode() {
+  return config.stream && config.stream.source === 'rtsp';
+}
+
 // ===========================================================================
 // ส่วนที่ 1: โหลด config จาก backend
 // ===========================================================================
@@ -234,11 +207,323 @@ async function loadConfig() {
 }
 
 // ===========================================================================
-// ส่วนที่ 2: กล้อง
+// ส่วนที่ 2: โหมดกล้องหลายตัว (เฟส 8)
 // ===========================================================================
 
+/** จอกล้องทั้งหมดบนหน้าเว็บ: cameraId -> StreamPanel */
+const panels = new Map();
+
+/** ตัวส่งภาพเว็บแคมของกล้องที่ตั้ง SOURCE=browser: cameraId -> WebcamFeeder */
+const feeders = new Map();
+
+/** ผู้ใช้กดเริ่มดูภาพอยู่หรือไม่ */
+let camerasRunning = false;
+
+/**
+ * สร้างจอให้ครบทุกกล้องตามรายการจาก backend
+ *
+ * เรียกครั้งเดียวตอนเปิดหน้า ไม่ได้สร้างใหม่ทุกครั้งที่สำรวจสถานะ
+ * เพราะการรื้อ DOM ทิ้งจะทำให้ภาพกะพริบและ WebSocket ต้องต่อใหม่ทั้งหมด
+ */
+async function buildCameraPanels() {
+  let data;
+  try {
+    const res = await fetch(API.cameras, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+  } catch (err) {
+    showAlert(el.camerasError, 'โหลดรายชื่อกล้องไม่สำเร็จ: ' + err.message);
+    return;
+  }
+
+  const cameras = (data.cameras || []).filter((c) => c.enabled);
+
+  if (cameras.length === 0) {
+    showAlert(
+      el.camerasError,
+      'ไม่มีกล้องที่เปิดใช้งานเลย\n' +
+      'ตรวจค่า CAMERA_IDS และ CAMERA_<ชื่อ>_ENABLED ในไฟล์ .env'
+    );
+    el.btnCameras.disabled = true;
+    return;
+  }
+
+  el.cameraGrid.replaceChildren();
+  panels.clear();
+  feeders.clear();
+
+  cameras.forEach((cam) => {
+    const panel = new StreamPanel(cam, {
+      getConfig: getConfig,
+      onUpdate: updateSummary,
+    });
+    panel.mount(el.cameraGrid);
+    panel.applyCameraInfo(cam);
+    panels.set(cam.id, panel);
+
+    // กล้องที่ใช้เว็บแคมของเครื่องนี้ ต้องมีตัวส่งภาพขึ้นไปให้ด้วย
+    // (กล้อง IP ไม่ต้องมี เพราะ backend ไปดึงเอง)
+    if (cam.source === 'browser') {
+      setupWebcamFeeder(panel, cam);
+    }
+  });
+
+  // บอกให้ชัดว่าตอนนี้มีกล้องกี่ตัวและเป็นชนิดไหนบ้าง
+  const webcamCount = cameras.filter((c) => c.source === 'browser').length;
+  let hint = 'มีกล้อง ' + cameras.length + ' ตัว';
+  if (webcamCount > 0) {
+    hint += ' (ในนั้น ' + webcamCount + ' ตัวใช้เว็บแคมของเครื่องนี้ ' +
+            'ต้องกดอนุญาตใช้กล้องและเปิดหน้านี้ค้างไว้)';
+  }
+  setText(el.camerasHint, hint);
+
+  updateSummary();
+}
+
+/**
+ * เตรียมตัวส่งภาพเว็บแคม พร้อมช่องเลือกอุปกรณ์ในหัวจอนั้น
+ *
+ * ช่องเลือกอยู่ "ในจอของกล้องตัวนั้น" ไม่ใช่แถบควบคุมรวมด้านบน
+ * เพราะถ้ามีกล้องแบบเว็บแคมมากกว่าหนึ่งตัวในอนาคต จะได้ไม่สับสนว่าอันไหนของใคร
+ */
+function setupWebcamFeeder(panel, cam) {
+  const feeder = new WebcamFeeder(cam.id, {
+    getConfig: getConfig,
+    onStatus: (state, message) => {
+      // ปัญหาของการส่งภาพเป็นปัญหาของกล้องตัวนี้ตัวเดียว
+      // จึงรายงานลงในจอของตัวเอง ไม่ใช่กล่อง error รวมด้านบน
+      if (state === 'error') {
+        panel.showAlert(message);
+      } else if (state === 'ok') {
+        panel.showAlert(null);
+      }
+    },
+  });
+  feeders.set(cam.id, feeder);
+
+  // ---- ช่องเลือกเว็บแคม ----
+  const group = document.createElement('label');
+  group.className = 'control-group';
+
+  const label = document.createElement('span');
+  label.className = 'control-group__label';
+  label.textContent = 'เว็บแคม';
+
+  const select = document.createElement('select');
+  select.className = 'select';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = '— กดเริ่มดูภาพเพื่อดูรายชื่อ —';
+  select.appendChild(placeholder);
+
+  select.addEventListener('change', async () => {
+    try {
+      await feeder.switchDevice(select.value || null);
+    } catch (err) {
+      panel.showAlert('สลับเว็บแคมไม่สำเร็จ: ' + err.message);
+    }
+  });
+
+  group.append(label, select);
+  panel.controls.appendChild(group);
+  panel.controls.hidden = false;
+
+  // เก็บไว้ให้ตอนเริ่มทำงานมาเติมรายชื่ออุปกรณ์
+  feeder.selectEl = select;
+}
+
+/** เติมรายชื่อเว็บแคมลงช่องเลือกของกล้องตัวนั้น */
+async function refreshFeederDevices(feeder) {
+  if (!feeder.selectEl) return;
+
+  let result;
+  try {
+    result = await feeder.listDevices();
+  } catch (err) {
+    return;
+  }
+
+  const select = feeder.selectEl;
+  const previous = select.value;
+  select.replaceChildren();
+
+  if (result.cameras.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '— ไม่พบเว็บแคมบนเครื่องนี้ —';
+    select.appendChild(opt);
+    return;
+  }
+
+  result.cameras.forEach((device, index) => {
+    const opt = document.createElement('option');
+    opt.value = device.deviceId;
+    // ถ้ายังไม่ได้สิทธิ์ label จะว่าง ต้องตั้งชื่อชั่วคราวให้ผู้ใช้พอเลือกได้
+    opt.textContent = device.label || ('กล้องตัวที่ ' + (index + 1) + ' (ยังไม่ทราบชื่อ)');
+    if (device.deviceId === previous) opt.selected = true;
+    select.appendChild(opt);
+  });
+}
+
+/** เริ่มดูภาพสดทุกกล้องพร้อมกัน */
+async function startAllCameras() {
+  if (camerasRunning) return;
+  camerasRunning = true;
+
+  showAlert(el.camerasError, null);
+  el.btnCameras.textContent = 'หยุดดูภาพสด';
+  el.btnCameras.classList.remove('btn--primary');
+  setText(el.camerasStatus, 'กำลังรับภาพสด');
+
+  // เปิดจอทุกตัวก่อน จอจะได้ขึ้นพร้อมกันโดยไม่ต้องรอเว็บแคมเปิดเสร็จ
+  panels.forEach((panel) => panel.start());
+
+  // ---- กล้องที่ใช้เว็บแคม: เปิดกล้องแล้วเริ่มป้อนภาพ ----
+  // ทำทีละตัวแบบไม่ให้ตัวที่ล้มไปหยุดตัวอื่น
+  // (กล้อง IP ที่เปิดไปแล้วต้องไม่ถูกกระทบถ้าเว็บแคมเปิดไม่ได้)
+  for (const [cameraId, feeder] of feeders) {
+    const panel = panels.get(cameraId);
+    try {
+      await refreshFeederDevices(feeder);
+      await feeder.start(feeder.selectEl ? (feeder.selectEl.value || null) : null);
+      // เปิดได้แล้วค่อยเติมรายชื่ออีกรอบ ตอนนี้จะได้ชื่อจริงของกล้องมาแล้ว
+      await refreshFeederDevices(feeder);
+    } catch (err) {
+      if (panel) {
+        panel.showAlert(
+          'เปิดเว็บแคมสำหรับกล้องนี้ไม่สำเร็จ: ' + err.message + '\n' +
+          'กล้องตัวอื่นยังทำงานต่อได้ตามปกติ'
+        );
+      }
+    }
+  }
+}
+
+/** หยุดดูภาพทุกกล้อง */
+function stopAllCameras() {
+  camerasRunning = false;
+
+  feeders.forEach((feeder) => feeder.stop());
+  panels.forEach((panel) => panel.stop());
+
+  el.btnCameras.textContent = 'เริ่มดูภาพสดทุกกล้อง';
+  el.btnCameras.classList.add('btn--primary');
+  setText(el.camerasStatus, 'ปิดอยู่');
+  updateSummary();
+}
+
+/**
+ * สรุปรวมทุกกล้องด้านบนหน้าเว็บ (ข้อ 11)
+ *
+ * รวมจาก "ตัวเลขล่าสุดของแต่ละจอ" ไม่ได้ไปนับใหม่เอง
+ * เพื่อให้ยอดรวมกับตัวเลขในจอตรงกันเสมอ ไม่มีทางขัดกันเอง
+ */
+function updateSummary() {
+  let faces = 0;
+  let known = 0;
+  let alive = 0;
+
+  panels.forEach((panel) => {
+    faces += panel.lastDetectedCount;
+    known += panel.lastKnownCount;
+    if (panel.alive) alive += 1;
+  });
+
+  const total = panels.size;
+
+  setText(el.summaryFaces, faces + ' คน');
+  setText(el.summaryKnown, known + ' คน');
+  setText(el.summaryCameras, alive + ' / ' + total + ' ตัว');
+
+  // สถานะรวม: บอกภาพใหญ่ในบรรทัดเดียว โดยไม่กลบรายละเอียดของแต่ละจอ
+  let overall;
+  let cls = 'summary__value';
+
+  if (!camerasRunning) {
+    overall = 'ยังไม่ได้เริ่มดูภาพ';
+  } else if (total === 0) {
+    overall = 'ไม่มีกล้องในระบบ';
+    cls += ' summary__value--error';
+  } else if (alive === total) {
+    overall = 'ปกติทุกกล้อง';
+    cls += ' summary__value--ok';
+  } else if (alive === 0) {
+    overall = 'ไม่มีกล้องส่งภาพเลย';
+    cls += ' summary__value--error';
+  } else {
+    overall = 'มีกล้องหลุด ' + (total - alive) + ' ตัว';
+    cls += ' summary__value--warn';
+  }
+
+  el.summaryOverall.className = cls;
+  setText(el.summaryOverall, overall);
+}
+
+/** สำรวจสถานะกล้องเป็นระยะ เพื่อให้เห็นว่ากล้องตัวไหนหลุดแม้ยังไม่ได้กดดูภาพ */
+async function refreshCameraInfo() {
+  if (!isCameraMode() || panels.size === 0) return;
+
+  try {
+    const res = await fetch(API.cameras, { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+
+    (data.cameras || []).forEach((cam) => {
+      const panel = panels.get(cam.id);
+      if (panel) panel.applyCameraInfo(cam);
+    });
+  } catch (err) {
+    // สำรวจไม่สำเร็จไม่ใช่เรื่องใหญ่ รอบหน้าค่อยลองใหม่
+    // (ถ้า backend ล่มจริง การ์ดสถานะด้านล่างจะฟ้องอยู่แล้ว)
+  }
+}
+
+el.btnCameras.addEventListener('click', () => {
+  if (camerasRunning) {
+    stopAllCameras();
+  } else {
+    startAllCameras();
+  }
+});
+
+// อัปเดตตัวเลขอัตราการวาดของทุกจอทุกครึ่งวินาทีพอ
+// ไม่ต้องอัปเดตทุกเฟรมให้เปลืองเปล่า
+setInterval(() => {
+  panels.forEach((panel) => panel.refreshRenderFps());
+}, 500);
+
+// ===========================================================================
+// ส่วนที่ 3: โหมดเว็บแคมเดี่ยว (เฟส 2 - ใช้ตอนไม่มีกล้อง IP เลย)
+// ===========================================================================
+
+const camera = new CameraController(el.video);
+
+/** ตัววาดกรอบของโหมดนี้ (โหมดกล้องหลายตัวมีของตัวเองอยู่ในแต่ละ StreamPanel) */
+const webcamOverlay = new FaceOverlay({
+  box: el.videoBox,
+  canvas: el.overlay,
+  getStreamSize: () => camera.streamSize,
+  getSmoothing: () => config.tracking.smoothing,
+  isMirrored: () => Boolean(config.stream.mirror),
+});
+
+/** สถานะการตรวจจับทั้งหมดรวมไว้ที่เดียว อ่านง่ายกว่าตัวแปรลอย ๆ กระจัดกระจาย */
+const detection = {
+  socket: null,          // WebSocket
+  running: false,        // กำลังส่งเฟรมอยู่หรือไม่
+  frameId: 0,            // เลขลำดับเฟรมที่จะส่งครั้งถัดไป
+  awaitingResult: false, // ส่งไปแล้วยังไม่ได้ผลกลับ (ใช้ทำ backpressure)
+  sendTimer: null,
+  lastSentAt: 0,         // performance.now() ตอนส่งเฟรมล่าสุด
+  watchdogTimer: null,   // กันค้างถ้า backend ไม่ตอบกลับมาเลย
+
+  // สถิติ
+  sentTimestamps: [],    // เวลาที่ส่งแต่ละเฟรม ใช้คำนวณ fps จริง
+  droppedFrames: 0,
+};
+
 /** เติมรายชื่อกล้องลง dropdown */
-async function refreshCameraList(selectedId) {
+async function refreshWebcamList(selectedId) {
   try {
     const result = await camera.listCameras();
 
@@ -267,13 +552,12 @@ async function refreshCameraList(selectedId) {
 }
 
 /** เปิดกล้อง + เริ่มส่งเฟรมไปตรวจจับ */
-async function startCamera() {
+async function startWebcam() {
   showAlert(el.cameraError, null);
   el.btnCamera.disabled = true;
 
   try {
     // ขอสิทธิ์ก่อนถ้ายังไม่เคยได้ เพื่อให้ enumerateDevices() คืน "ชื่อ" กล้องมาด้วย
-    // ถ้าไม่ทำขั้นนี้ dropdown จะมีแต่ "กล้องตัวที่ 1/2/3" ซึ่งผู้ใช้เลือกไม่ถูก
     const before = await camera.listCameras();
     if (!before.hasLabels) {
       await camera.requestPermission();
@@ -283,7 +567,7 @@ async function startCamera() {
     const size = await camera.start(deviceId);
 
     // เปิดได้แล้วค่อยเติมรายชื่อ ตอนนี้จะได้ชื่อจริงของกล้องมาแล้ว
-    await refreshCameraList(deviceId);
+    await refreshWebcamList(deviceId);
 
     el.videoIdle.hidden = true;
     el.btnCamera.textContent = 'ปิดกล้อง';
@@ -296,11 +580,11 @@ async function startCamera() {
     // ตั้งสัดส่วนกล่องตามความละเอียดจริงของเว็บแคม (เช่น 1280x720 หรือ 640x480)
     // เพื่อให้เห็นภาพทั้งเฟรมโดยไม่มีแถบว่างเหลือทิ้งไว้เปล่า ๆ
     if (size) {
-      applyAspectRatio(size.width, size.height);
+      el.videoBox.style.aspectRatio = size.width + ' / ' + size.height;
     }
 
-    syncOverlaySize();
-    startRenderLoop();
+    webcamOverlay.syncSize();
+    webcamOverlay.start();
     startDetection();
 
   } catch (err) {
@@ -312,55 +596,40 @@ async function startCamera() {
 }
 
 /** ปิดกล้อง + หยุดส่งเฟรม */
-function stopCamera() {
+function stopWebcam() {
   stopDetection();
-  stopRenderLoop();
+  webcamOverlay.stop();
   camera.stop();
 
   el.videoIdle.hidden = false;
   el.btnCamera.textContent = 'เปิดกล้อง';
   el.btnCamera.classList.add('btn--primary');
 
-  setText(el.statResolution, null);
-  setText(el.statSentSize, null);
-  setText(el.statFps, null);
-  setText(el.statProcess, null);
-  setText(el.statFaces, null);
-  setText(el.statTracks, null);
-  setText(el.statRenderFps, null);
-  setText(el.statDropped, null);
+  ['statResolution', 'statSentSize', 'statFps', 'statProcess', 'statFaces',
+   'statTracks', 'statKnown', 'statRenderFps', 'statDropped',
+  ].forEach((key) => setText(el[key], null));
 }
 
 el.btnCamera.addEventListener('click', () => {
   if (camera.isRunning) {
-    stopCamera();
+    stopWebcam();
   } else {
-    startCamera();
+    startWebcam();
   }
 });
 
 // สลับกล้องระหว่างที่เปิดอยู่ = เปิดตัวใหม่ทันที
 el.cameraSelect.addEventListener('change', () => {
   if (camera.isRunning) {
-    stopCamera();
-    startCamera();
+    stopWebcam();
+    startWebcam();
   }
 });
-
-// ===========================================================================
-// ส่วนที่ 3: WebSocket ตรวจจับใบหน้า
-// ===========================================================================
-
-/** ประกอบ URL ของ WebSocket จาก origin ปัจจุบัน (http -> ws, https -> wss) */
-function buildWebSocketUrl(path) {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return protocol + '//' + window.location.host + path;
-}
 
 function startDetection() {
   if (detection.socket) return;
 
-  const socket = new WebSocket(buildWebSocketUrl('/ws/detect'));
+  const socket = new WebSocket(buildDetectSocketUrl());
   socket.binaryType = 'arraybuffer';
   detection.socket = socket;
 
@@ -395,8 +664,7 @@ function startDetection() {
     }
 
     onResultSettled();
-    detection.lastSourceSize = data.source_size || null;
-    detection.lastProcessMs = data.process_ms;
+    webcamOverlay.setFrameSize(data.source_size || null);
 
     const tracks = data.tracks || [];
     const visibleCount = tracks.filter((t) => t.visible).length;
@@ -415,7 +683,7 @@ function startDetection() {
     setText(el.statSentSize, data.source_size ? data.source_size[0] + ' × ' + data.source_size[1] : null);
 
     // ป้อนผลใหม่ให้ตัววาด แต่ไม่วาดตรงนี้ - ปล่อยให้วงวาดของจอเป็นคนวาด
-    updateRenderTargets(tracks);
+    webcamOverlay.setTracks(tracks);
   });
 
   socket.addEventListener('error', () => {
@@ -457,7 +725,6 @@ function stopDetection() {
     detection.socket = null;
   }
 
-  detection.lastSourceSize = null;
   setText(el.detectStatus, 'ปิดอยู่');
 }
 
@@ -474,8 +741,6 @@ function frameIntervalMs() {
  * เหตุผล: ถ้าตั้ง setInterval คงที่ 100 ms แล้วการตรวจจับใช้เวลา ~98 ms
  * จังหวะจะชนกันพอดี คือ timer ดังตอนที่ผลยังมาไม่ถึง เลยต้องทิ้งเฟรมนั้น
  * แล้วไปรออีก 100 ms เต็ม ผลคือได้จริงแค่ครึ่งเดียว (~5 fps) และทิ้งเฟรมครึ่งหนึ่งทิ้ง ๆ
- *
- * การนับจากเวลาที่ "พร้อมจริง" ทำให้ได้อัตราใกล้เคียงที่ตั้งไว้โดยไม่มีเฟรมค้างในคิว
  */
 function scheduleNextFrame(delayMs) {
   if (!detection.running) return;
@@ -545,7 +810,6 @@ async function sendFrame() {
     recordSentFrame();
 
     // ถ้า backend ไม่ตอบกลับมาเลย (ค้าง/ตาย) ต้องไม่ปล่อยให้วงจรหยุดนิ่งถาวร
-    // ครบเวลาแล้วให้ถือว่าเฟรมนั้นหายไป แล้วเดินต่อ พร้อมแจ้งให้ผู้ใช้เห็น
     detection.watchdogTimer = setTimeout(() => {
       if (!detection.awaitingResult) return;
       detection.droppedFrames += 1;
@@ -577,775 +841,31 @@ function recordSentFrame() {
   }
 }
 
-// ===========================================================================
-// ส่วนที่ 4: วาดกรอบทับภาพ
-//
-// การแปลงพิกัดมี 3 ชั้น ห้ามข้ามชั้นใดชั้นหนึ่ง:
-//
-//   ชั้นที่ 1  ภาพที่ส่งไปตรวจ   เช่น 640 × 360   <- พิกัดที่ backend ส่งกลับมาอยู่ในระบบนี้
-//   ชั้นที่ 2  สตรีมจริงของกล้อง เช่น 1280 × 720
-//   ชั้นที่ 3  ขนาดที่แสดงบนจอ   เช่น 820 × 461   <- ขนาดตาม CSS ซึ่งเปลี่ยนตามความกว้างหน้าต่าง
-//
-// ถ้าคำนวณผิดชั้น กรอบจะเลื่อนหรือขนาดไม่พอดีกับใบหน้า
-// และเมื่อภาพเป็นกระจกเงา ต้องกลับพิกัดแกน X อีกชั้นหนึ่งด้วย
-// ===========================================================================
-
-/**
- * ปรับขนาด canvas ที่วาดกรอบ ให้ครอบ "ทั้งกล่อง" ไม่ใช่แค่ส่วนที่มีภาพ
- *
- * ที่ให้ครอบทั้งกล่องเพราะเมื่อใช้ object-fit: contain แล้วอาจเกิดแถบว่าง
- * การมีระบบพิกัดจุดเริ่มเดียว (มุมซ้ายบนของกล่อง) ทำให้คิดง่ายและพลาดยาก
- * ส่วนการชดเชยแถบว่างไปอยู่ที่ getFrameTransform ที่เดียว
- */
-function syncOverlaySize() {
-  const boxRect = el.videoBox.getBoundingClientRect();
-  if (boxRect.width === 0 || boxRect.height === 0) return;
-
-  // คูณด้วย devicePixelRatio เพื่อให้เส้นคมบนจอความละเอียดสูง
-  // ถ้าไม่คูณ กรอบจะเบลอบนจอ Retina / จอ 4K ที่ตั้ง scale ไว้
-  const dpr = window.devicePixelRatio || 1;
-
-  el.overlay.width = Math.round(boxRect.width * dpr);
-  el.overlay.height = Math.round(boxRect.height * dpr);
-  el.overlay.style.width = boxRect.width + 'px';
-  el.overlay.style.height = boxRect.height + 'px';
-  el.overlay.style.left = '0px';
-  el.overlay.style.top = '0px';
-
-  const ctx = el.overlay.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // ทำงานในหน่วย CSS pixel ต่อจากนี้
-}
-
-function clearOverlay() {
-  const ctx = el.overlay.getContext('2d');
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, el.overlay.width, el.overlay.height);
-  ctx.restore();
-}
-
-/**
- * element ที่ใช้แสดงภาพในโหมดปัจจุบัน
- *   โหมด browser -> <video> ที่เล่นเว็บแคม
- *   โหมด rtsp    -> <canvas> ที่เราวาดเฟรมจาก backend ลงไป
- */
-function getDisplayElement() {
-  return isRtspMode() ? el.streamCanvas : el.video;
-}
-
-/** ขนาดจริงของภาพต้นทาง (ไม่ใช่ขนาดที่แสดงบนจอ) */
-function getStreamSize() {
-  if (isRtspMode()) {
-    // ในโหมด rtsp ภาพที่ส่งมาคือเฟรมเต็ม ขนาดจึงเท่ากับขนาดที่ใช้ตรวจจับพอดี
-    if (!el.streamCanvas.width) return null;
-    return { width: el.streamCanvas.width, height: el.streamCanvas.height };
-  }
-  return camera.streamSize;
-}
-
-/**
- * ตั้งสัดส่วนของกล่องภาพให้ตรงกับสตรีมจริง
- *
- * ต้องตั้งจาก "ขนาดที่ backend ส่งมาจริง" ไม่ใช่ hardcode 16:9 ไว้ใน CSS
- * เพราะถ้าเปลี่ยนไปใช้ /stream1 หรือเปลี่ยนรุ่นกล้อง สัดส่วนจะเปลี่ยนตาม
- * ถ้าสัดส่วนกล่องตรงกับภาพ จะไม่เกิดแถบว่างเลยและใช้พื้นที่จอได้เต็มที่
- */
-function applyAspectRatio(width, height) {
-  if (!width || !height) return;
-
-  const ratio = width + ' / ' + height;
-  if (el.videoBox.style.aspectRatio === ratio) return;
-
-  el.videoBox.style.aspectRatio = ratio;
-  // สัดส่วนเปลี่ยน = ขนาดกล่องเปลี่ยน ต้องปรับ canvas ที่วาดกรอบตามทันที
-  syncOverlaySize();
-}
-
-/**
- * ===========================================================================
- * ฟังก์ชันแปลงพิกัดหลัก - "เฟรมต้นฉบับ -> พิกัดบน canvas ที่วาดกรอบ"
- *
- * ทุกที่ที่ต้องวาดทับภาพต้องเรียกฟังก์ชันนี้ที่เดียว ห้ามกระจายสูตรไว้หลายจุด
- * เพราะถ้าสูตรไม่ตรงกันแม้แต่ที่เดียว กรอบจะเลื่อนโดยหาสาเหตุยากมาก
- *
- * มี 3 อย่างที่ต้องคิดให้ครบ:
- *
- *   1. สเกล   - ภาพถูกย่อลงเท่าไรจึงพอดีกล่อง (object-fit: contain)
- *   2. offset - แถบว่าง (letterbox) ที่เกิดขึ้นเมื่อสัดส่วนกล่องไม่ตรงกับภาพ
- *               contain จะจัดภาพไว้กลางกล่องเสมอ จึงมีแถบว่างแบ่งครึ่งสองข้าง
- *   3. mirror - โหมดเว็บแคมพลิกภาพกระจก แต่ canvas ไม่ได้ถูกพลิกตาม
- *               จึงต้องกลับพิกัดแกน X เอง
- *
- * และต้องแปลง 2 ทอด เพราะพิกัดที่ backend ส่งมาอิงกับ "ภาพที่ใช้ตรวจ"
- * ซึ่งอาจเล็กกว่าสตรีมจริง (โหมดเว็บแคมย่อเหลือกว้าง 640 ก่อนส่ง)
- *
- *     พิกัดจากผลตรวจจับ -> ขนาดสตรีมจริง -> ขนาดที่ภาพถูกวาดบนจอ
- *
- * คืน null ถ้ายังคำนวณไม่ได้ (ยังไม่มีภาพ หรือกล่องยังไม่มีขนาด)
- * ===========================================================================
- */
-function getFrameTransform() {
-  if (!detection.lastSourceSize) return null;
-
-  // ขนาดของภาพที่ผลตรวจจับอ้างอิงอยู่
-  const frameWidth = detection.lastSourceSize[0];
-  const frameHeight = detection.lastSourceSize[1];
-  if (!frameWidth || !frameHeight) return null;
-
-  // ขนาดจริงของสตรีม (อาจใหญ่กว่าภาพที่ส่งไปตรวจ)
-  const stream = getStreamSize();
-  if (!stream || !stream.width || !stream.height) return null;
-
-  // พื้นที่ทั้งหมดที่ภาพมีสิทธิ์ใช้
-  const box = el.videoBox.getBoundingClientRect();
-  if (box.width === 0 || box.height === 0) return null;
-
-  // ---- 1. สเกลแบบ contain: ย่อตามด้านที่ "คับ" กว่า เพื่อให้เห็นทั้งเฟรม ----
-  // ใช้ min() ไม่ใช่ max() ตรงนี้คือหัวใจของ contain
-  // ถ้าใช้ max() จะกลายเป็น cover ซึ่งจะตัดขอบภาพทิ้ง
-  const scale = Math.min(box.width / stream.width, box.height / stream.height);
-
-  const drawnWidth = stream.width * scale;
-  const drawnHeight = stream.height * scale;
-
-  // ---- 2. แถบว่างจาก letterbox (แบ่งครึ่งสองข้างเพราะ contain จัดภาพไว้กลาง) ----
-  const offsetX = (box.width - drawnWidth) / 2;
-  const offsetY = (box.height - drawnHeight) / 2;
-
-  // ---- ตัวคูณรวม: จากพิกัดของภาพที่ใช้ตรวจ ไปเป็นพิกเซลบนจอ ----
-  const scaleX = drawnWidth / frameWidth;
-  const scaleY = drawnHeight / frameHeight;
-
-  const mirrored = Boolean(config.stream.mirror);
-
-  return {
-    scaleX: scaleX,
-    scaleY: scaleY,
-    offsetX: offsetX,
-    offsetY: offsetY,
-    drawnWidth: drawnWidth,
-    drawnHeight: drawnHeight,
-    mirrored: mirrored,
-
-    /**
-     * แปลงกรอบสี่เหลี่ยมจากพิกัดเฟรมต้นฉบับ ไปเป็นพิกัดบน canvas
-     * @returns {{x:number, y:number, w:number, h:number}}
-     */
-    rect: function (x, y, w, h) {
-      const width = w * scaleX;
-      const height = h * scaleY;
-      const top = offsetY + y * scaleY;
-
-      // ภาพถูกพลิกกระจกด้วย CSS transform: scaleX(-1) แต่ canvas ไม่ได้ถูกพลิกตาม
-      // จึงต้องกลับพิกัดแกน X เอง โดยกลับ "ภายในพื้นที่ที่ภาพถูกวาด" เท่านั้น
-      // ไม่ใช่กลับทั้งกล่อง ไม่งั้นแถบว่างจะทำให้กรอบเลื่อนไปอีก
-      const left = mirrored
-        ? offsetX + drawnWidth - (x + w) * scaleX
-        : offsetX + x * scaleX;
-
-      return { x: left, y: top, w: width, h: height };
-    },
-  };
-}
-
-/**
- * รับผลชุดใหม่จาก backend มาตั้งเป็น "เป้าหมาย" ของแต่ละกรอบ
- *
- * ไม่วาดที่นี่ เพราะการวาดเป็นหน้าที่ของวงวาดที่เดินตามจังหวะจอ
- * ที่นี่แค่บอกว่า "กรอบควรจะไปอยู่ตรงไหน" เท่านั้น
- */
-function updateRenderTargets(tracks) {
-  const seen = new Set();
-
-  tracks.forEach((t) => {
-    const box = { x: t.bbox[0], y: t.bbox[1], w: t.bbox[2], h: t.bbox[3] };
-    seen.add(t.track_id);
-
-    let entry = render.boxes.get(t.track_id);
-
-    if (!entry) {
-      // กรอบใหม่: ให้ตำแหน่งที่วาดเริ่มตรงกับเป้าหมายเลย
-      // ถ้าเริ่มจากที่อื่นแล้วค่อยไหลเข้ามา จะเห็นกรอบวิ่งมาจากมุมจอ ซึ่งดูแปลก
-      entry = {
-        current: Object.assign({}, box),
-        target: box,
-        score: t.score,
-        hits: t.hits,
-        visible: t.visible,
-        missing: t.missing,
-        identityState: t.identity_state || 'pending',
-        identity: t.identity || null,
-        direction: t.direction || null,
-        alpha: 0,          // เริ่มจากโปร่งใสแล้วค่อย ๆ ชัดขึ้น
-        targetAlpha: 1,
-      };
-      render.boxes.set(t.track_id, entry);
-    } else {
-      entry.target = box;
-      entry.score = t.score;
-      entry.hits = t.hits;
-      entry.visible = t.visible;
-      entry.missing = t.missing;
-      entry.identityState = t.identity_state || 'pending';
-      entry.identity = t.identity || null;
-      entry.direction = t.direction || null;
-    }
-
-    // กรอบที่ backend ค้างไว้ (หาใบหน้าไม่เจอชั่วคราว) ให้วาดจาง ๆ
-    // ผู้ใช้จะได้รู้ว่าระบบ "กำลังเดาตำแหน่งอยู่" ไม่ใช่เห็นจริง
-    if (!t.visible) {
-      entry.targetAlpha = FADED_ALPHA;
-    } else if (t.hits >= MIN_HITS_TO_DRAW) {
-      entry.targetAlpha = 1;
-    } else {
-      // เพิ่งเจอเฟรมเดียว ยังไม่แน่ว่าใช่ใบหน้าจริง รอดูอีกเฟรม
-      entry.targetAlpha = 0;
-    }
-  });
-
-  // track ที่หายไปจากผลชุดนี้ = backend ลบทิ้งแล้ว ให้ค่อย ๆ จางหายไป
-  // ไม่ลบทันทีเพื่อไม่ให้กรอบ "ดับวับ" ซึ่งสะดุดตากว่าการจางหาย
-  render.boxes.forEach((entry, trackId) => {
-    if (!seen.has(trackId)) {
-      entry.targetAlpha = 0;
-      entry.dead = true;
-    }
-  });
-}
-
-/**
- * ค่าที่ใช้ไหลเข้าหาเป้าหมาย โดยไม่ขึ้นกับว่าจอรีเฟรชเร็วแค่ไหน
- *
- * ถ้าใช้ค่าคงที่ตรง ๆ (current += (target-current) * 0.35) ความลื่นจะเปลี่ยนไป
- * ตามอัตรารีเฟรชของจอ คือจอ 144Hz จะไหลเร็วกว่าจอ 60Hz กว่าสองเท่า
- * สูตรนี้ปรับให้ได้ผลเท่ากันทุกจอ โดยอิงจากเวลาจริงที่ผ่านไป
- */
-function smoothingFactor(dtMs) {
-  const s = Math.min(0.999, Math.max(0.001, config.tracking.smoothing));
-  return 1 - Math.pow(1 - s, dtMs / 16.667); // 16.667 ms = หนึ่งเฟรมที่ 60Hz
-}
-
-/** ไหลค่าหนึ่งค่าเข้าหาเป้าหมาย */
-function lerp(from, to, k) {
-  return from + (to - from) * k;
-}
-
-/**
- * วงวาดหลัก - ทำงานทุกเฟรมของจอ (ปกติ 60 ครั้ง/วินาที)
- *
- * นี่คือหัวใจของเฟส 3: ของเดิมวาดเฉพาะตอนได้ผลใหม่จาก backend (~8 ครั้ง/วินาที)
- * ตาคนจึงเห็นกรอบกระโดดเป็นจังหวะ ๆ
- * พอแยกการวาดออกมาเดินตามจอแล้วไหลตำแหน่งทีละนิด กรอบจะเกาะใบหน้าลื่นขึ้นมาก
- */
-function renderTick(now) {
-  render.rafId = requestAnimationFrame(renderTick);
-
-  const dt = render.lastTickAt ? (now - render.lastTickAt) : 16.667;
-  render.lastTickAt = now;
-
-  // วัดอัตราการวาดจริงจากช่วง 1 วินาทีล่าสุด
-  render.tickTimestamps.push(now);
-  while (render.tickTimestamps.length && now - render.tickTimestamps[0] > 1000) {
-    render.tickTimestamps.shift();
-  }
-
-  const k = smoothingFactor(dt);
-
-  // ไหลตัวคูณความจาง (ผลตรวจเก่า) เข้าหาเป้าหมายอย่างนุ่มนวลเช่นกัน
-  render.staleFactor = lerp(render.staleFactor, render.staleTarget, k);
-
-  // ไหลทุกกรอบเข้าหาเป้าหมาย แล้วเก็บกวาดตัวที่จางจนมองไม่เห็นแล้ว
-  render.boxes.forEach((entry, trackId) => {
-    entry.current.x = lerp(entry.current.x, entry.target.x, k);
-    entry.current.y = lerp(entry.current.y, entry.target.y, k);
-    entry.current.w = lerp(entry.current.w, entry.target.w, k);
-    entry.current.h = lerp(entry.current.h, entry.target.h, k);
-    entry.alpha = lerp(entry.alpha, entry.targetAlpha, k);
-
-    if (entry.dead && entry.alpha < 0.02) {
-      render.boxes.delete(trackId);
-    }
-  });
-
-  drawBoxes();
-}
-
-/**
- * ประกอบข้อความบนป้ายกำกับจากผลการจดจำ
- *
- * ชื่อ-นามสกุลมาจากฐานข้อมูลผ่าน backend เสมอ ที่นี่แค่เอามาต่อกัน
- * ห้ามมีชื่อคนเขียนตายตัวอยู่ในไฟล์นี้เด็ดขาด
- */
-function buildLabel(entry) {
-  const ident = entry.identity;
-
-  if (entry.identityState === 'recognized' && ident) {
-    const name = [ident.first_name, ident.last_name].filter(Boolean).join(' ');
-    const percent = Math.round((ident.confidence || 0) * 100);
-    return ident.student_id + '  ' + name + '  ' + percent + '%';
-  }
-
-  if (entry.identityState === 'unknown') {
-    return 'Unknown';
-  }
-
-  // pending: กำลังรวบรวมผลโหวตอยู่
-  return 'กำลังตรวจสอบ…';
-}
-
-/** วาดกรอบทั้งหมดตามตำแหน่งที่ไหลมาถึงตอนนี้ */
-function drawBoxes() {
-  const ctx = el.overlay.getContext('2d');
-  clearOverlay();
-
-  const tf = getFrameTransform();
-  if (!tf) return;
-
-  // ขอบเขตของ "พื้นที่ที่ภาพถูกวาดจริง" ใช้ดันป้ายให้อยู่ในภาพ ไม่ไปลอยบนแถบว่าง
-  const imageLeft = tf.offsetX;
-  const imageTop = tf.offsetY;
-  const imageRight = tf.offsetX + tf.drawnWidth;
-  const imageBottom = tf.offsetY + tf.drawnHeight;
-
-  ctx.lineWidth = BOX_LINE_WIDTH;
-  ctx.font = '600 14px "Sarabun", "Segoe UI", sans-serif';
-  ctx.textBaseline = 'top';
-  ctx.lineJoin = 'round';
-
-  render.boxes.forEach((entry) => {
-    // ความทึบสุดท้าย = ความทึบของกรอบนั้น คูณด้วยตัวคูณรวมตอนผลตรวจเก่า
-    const alpha = entry.alpha * render.staleFactor;
-    if (alpha < 0.02) return;
-
-    const c = entry.current;
-
-    // แปลงพิกัดที่เดียวผ่านฟังก์ชันกลาง (คิดสเกล แถบว่าง และ mirror ให้ครบแล้ว)
-    const box = tf.rect(c.x, c.y, c.w, c.h);
-    const x = box.x;
-    const y = box.y;
-    const w = box.w;
-    const h = box.h;
-
-    const color = BOX_COLORS[entry.identityState] || BOX_COLORS.pending;
-
-    ctx.globalAlpha = alpha;
-    ctx.strokeStyle = color;
-    ctx.strokeRect(x, y, w, h);
-
-    // ---- ป้ายกำกับ ----
-    const label = buildLabel(entry);
-    const padding = 7;
-    const labelHeight = 23;
-    const textWidth = ctx.measureText(label).width;
-    const labelWidth = textWidth + padding * 2;
-
-    // ถ้าป้ายล้นขอบบนของ "ภาพ" ให้ย้ายไปไว้ใต้กรอบแทน
-    // เทียบกับขอบภาพ ไม่ใช่ขอบกล่อง เพราะแถบว่างไม่ใช่ที่ที่ควรมีป้ายไปลอยอยู่
-    let labelY = y - labelHeight - 2;
-    if (labelY < imageTop) {
-      labelY = y + h + 2;
-    }
-
-    // ถ้าป้ายยาวจนล้นขอบขวาของภาพ ให้ดันกลับเข้ามาให้อ่านครบ
-    // (ชื่อไทยเต็ม ๆ กับรหัสนักศึกษารวมกันยาวกว่ากรอบใบหน้าเสมอ)
-    let labelX = x;
-    if (labelX + labelWidth > imageRight) {
-      labelX = Math.max(imageLeft, imageRight - labelWidth);
-    }
-
-    // พื้นหลังทึบรองข้อความ เพื่อให้อ่านออกแม้ฉากหลังสว่าง
-    ctx.fillStyle = color;
-    ctx.fillRect(labelX, labelY, labelWidth, labelHeight);
-
-    ctx.fillStyle = '#0f1420';  // ตัวอักษรสีเข้มบนพื้นสีสด อ่านง่ายกว่าสีขาว
-    ctx.fillText(label, labelX + padding, labelY + 4);
-
-    // ---- ป้ายทิศทางการเคลื่อนที่ (เฟส 5) ----
-    // วางไว้ "ใต้กรอบ" เสมอ เพื่อไม่ให้ชนกับป้ายชื่อที่อยู่ด้านบน
-    // ถ้าล้นขอบล่างของภาพก็ย้ายขึ้นมาไว้ในกรอบแทน
-    if (entry.direction) {
-      const dirLabel = entry.direction.label;
-      const dirWidth = ctx.measureText(dirLabel).width + padding * 2;
-      const dirHeight = 21;
-
-      // ถ้าป้ายชื่อถูกดันลงมาอยู่ใต้กรอบแล้ว ให้ป้ายทิศทางลงมาต่อท้ายอีกชั้น
-      const nameLabelIsBelow = labelY > y;
-      let dirY = y + h + 2 + (nameLabelIsBelow ? labelHeight + 2 : 0);
-
-      // ล้นขอบล่างของภาพ ให้ย้ายขึ้นมาไว้ในกรอบแทน
-      if (dirY + dirHeight > imageBottom) {
-        dirY = Math.max(imageTop, y + h - dirHeight - 2);
-      }
-
-      let dirX = x;
-      if (dirX + dirWidth > imageRight) {
-        dirX = Math.max(imageLeft, imageRight - dirWidth);
-      }
-
-      // "อยู่กับที่" ใช้สีเทาเข้มให้ดูเงียบกว่า เพราะไม่ใช่เหตุการณ์ที่ต้องสนใจ
-      // ส่วนตอนเคลื่อนที่ใช้พื้นเข้มตัวหนังสือสว่าง ให้สะดุดตากว่า
-      const moving = entry.direction.value !== 'still';
-      ctx.fillStyle = moving ? 'rgba(15, 20, 32, 0.85)' : 'rgba(15, 20, 32, 0.55)';
-      ctx.fillRect(dirX, dirY, dirWidth, dirHeight);
-
-      ctx.fillStyle = moving ? '#ffffff' : '#93a0b8';
-      ctx.fillText(dirLabel, dirX + padding, dirY + 3);
-    }
-  });
-
-  ctx.globalAlpha = 1;
-}
-
-function startRenderLoop() {
-  if (render.rafId !== null) return;
-  render.lastTickAt = 0;
-  render.tickTimestamps = [];
-  render.rafId = requestAnimationFrame(renderTick);
-}
-
-function stopRenderLoop() {
-  if (render.rafId !== null) {
-    cancelAnimationFrame(render.rafId);
-    render.rafId = null;
-  }
-  render.boxes.clear();
-  clearOverlay();
-}
-
-// อัปเดตตัวเลขอัตราการวาดทุกครึ่งวินาทีพอ ไม่ต้องอัปเดตทุกเฟรมให้เปลืองเปล่า
-setInterval(() => {
-  if (render.rafId === null) return;
-  setText(el.statRenderFps, render.tickTimestamps.length + ' fps');
-}, 500);
-
 // ขนาดที่แสดงเปลี่ยนได้ตลอด (ย่อ/ขยายหน้าต่าง) ต้องปรับขนาด canvas ตาม
 // ไม่ต้องสั่งวาดเอง เพราะวงวาดเดินอยู่ทุกเฟรมของจออยู่แล้ว
-const resizeObserver = new ResizeObserver(() => {
-  if (!camera.isRunning) return;
-  syncOverlaySize();
+const webcamResizeObserver = new ResizeObserver(() => {
+  if (webcamOverlay.isRunning) webcamOverlay.syncSize();
 });
-// เฝ้าที่ "กล่อง" ไม่ใช่ที่ตัววิดีโอ เพราะตอนนี้ภาพวางทับกล่องแบบ absolute
-// ขนาดที่เปลี่ยนจริงคือขนาดกล่อง (ตอนย่อ-ขยายหน้าต่าง หรือตอนสัดส่วนเปลี่ยน)
-resizeObserver.observe(el.videoBox);
+webcamResizeObserver.observe(el.videoBox);
+
+// อัปเดตตัวเลขอัตราการวาดของโหมดเว็บแคมเดี่ยว
+setInterval(() => {
+  if (!webcamOverlay.isRunning) return;
+  setText(el.statRenderFps, webcamOverlay.renderFps + ' fps');
+}, 500);
 
 // ===========================================================================
-// ส่วนที่ 4.5: โหมดกล้อง IP (เฟส 6)
-//
-// ต่างจากโหมดเว็บแคมตรงทิศทางของภาพ:
-//     โหมด browser : เบราว์เซอร์จับภาพเอง แล้วส่งไปให้ backend ตรวจ
-//     โหมด rtsp    : backend ต่อกล้องเอง ตรวจเสร็จแล้ว push ภาพ+ผล มาให้หน้าเว็บ
-//
-// หน้าเว็บจึงไม่ต้องขอสิทธิ์ใช้กล้องเลยในโหมดนี้ และเปิดดูจากเครื่องไหนก็ได้
-// ไม่ติดข้อจำกัด localhost/HTTPS แบบเว็บแคม
+// ส่วนที่ 4: เลือกโหมดให้ตรงกับที่ backend ใช้อยู่
 // ===========================================================================
-
-const rtsp = {
-  socket: null,
-  running: false,
-  cameraId: null,
-  ctx: null,          // context ของ canvas ที่วาดภาพ
-
-  frameTimestamps: [], // ใช้คำนวณ fps ที่ได้รับจริง
-};
-
-/** ตอนนี้อยู่ในโหมดกล้อง IP หรือไม่ */
-function isRtspMode() {
-  return config.stream && config.stream.source === 'rtsp';
-}
-
-/** โหลดรายชื่อกล้อง IP มาเติม dropdown */
-async function loadCameraList() {
-  try {
-    const res = await fetch('/api/cameras', { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-
-    el.rtspSelect.replaceChildren();
-    const cameras = (data.cameras || []).filter((c) => c.enabled);
-
-    if (cameras.length === 0) {
-      const opt = document.createElement('option');
-      opt.value = '';
-      opt.textContent = '— ไม่มีกล้องที่เปิดใช้งาน (ตรวจ CAMERA_IDS ใน .env) —';
-      el.rtspSelect.appendChild(opt);
-      return [];
-    }
-
-    cameras.forEach((cam) => {
-      const opt = document.createElement('option');
-      opt.value = cam.id;
-      // บอกสถานะไปในชื่อเลย ผู้ใช้จะได้รู้ทันทีว่ากล้องตัวไหนหลุดอยู่
-      const state = cam.alive ? '🟢' : (cam.connected ? '🟡' : '🔴');
-      opt.textContent = state + ' ' + cam.name + ' (' + cam.direction + ')';
-      el.rtspSelect.appendChild(opt);
-    });
-
-    return cameras;
-  } catch (err) {
-    showAlert(el.cameraError, 'โหลดรายชื่อกล้องไม่สำเร็จ: ' + err.message);
-    return [];
-  }
-}
-
-/** แกะข้อความ binary ที่ backend ส่งมา: [4 ไบต์ความยาว JSON][JSON][JPEG] */
-function decodeStreamMessage(buffer) {
-  const view = new DataView(buffer);
-  const jsonLength = view.getUint32(0, true);   // true = little-endian
-
-  const jsonBytes = new Uint8Array(buffer, 4, jsonLength);
-  const meta = JSON.parse(new TextDecoder('utf-8').decode(jsonBytes));
-
-  const jpegBytes = new Uint8Array(buffer, 4 + jsonLength);
-
-  return { meta: meta, jpeg: jpegBytes };
-}
-
-async function startStream() {
-  if (rtsp.socket) return;
-
-  const cameraId = el.rtspSelect.value;
-  if (!cameraId) {
-    showAlert(el.cameraError, 'ยังไม่ได้เลือกกล้อง');
-    return;
-  }
-
-  showAlert(el.cameraError, null);
-  rtsp.cameraId = cameraId;
-  rtsp.frameTimestamps = [];
-  rtsp.ctx = el.streamCanvas.getContext('2d', { alpha: false });
-
-  const socket = new WebSocket(buildWebSocketUrl('/ws/stream?camera=' + encodeURIComponent(cameraId)));
-  socket.binaryType = 'arraybuffer';
-  rtsp.socket = socket;
-
-  setText(el.detectStatus, 'กำลังเชื่อมต่อ…');
-
-  socket.addEventListener('open', () => {
-    rtsp.running = true;
-    setText(el.detectStatus, 'กำลังรับภาพสด');
-    el.videoIdle.hidden = true;
-    el.streamCanvas.hidden = false;
-    el.video.hidden = true;
-    el.btnStream.textContent = 'หยุดดูภาพสด';
-    el.btnStream.classList.remove('btn--primary');
-    el.statLatencyBox.hidden = false;
-    startRenderLoop();
-  });
-
-  socket.addEventListener('message', async (event) => {
-    // ข้อความที่เป็นข้อความล้วน = แจ้งสถานะหรือ error
-    if (typeof event.data === 'string') {
-      let data;
-      try { data = JSON.parse(event.data); } catch { return; }
-
-      if (data.type === 'error') {
-        showAlert(el.cameraError, 'backend แจ้งข้อผิดพลาด: ' + data.message);
-        return;
-      }
-
-      if (data.type === 'camera_status') {
-        handleCameraStatus(data);
-        return;
-      }
-      return;
-    }
-
-    // ข้อความ binary = หนึ่งเฟรมพร้อมผลตรวจจับ
-    await handleStreamFrame(event.data);
-  });
-
-  socket.addEventListener('close', (event) => {
-    rtsp.running = false;
-    rtsp.socket = null;
-    setText(el.detectStatus, 'ตัดการเชื่อมต่อแล้ว');
-
-    if (!event.wasClean) {
-      showAlert(
-        el.cameraError,
-        'การเชื่อมต่อกับ backend หลุด (code ' + event.code + ') — ' +
-        'ตรวจ log ด้วย docker compose logs backend'
-      );
-    }
-  });
-}
-
-/** จัดการข้อความแจ้งว่ากล้องหลุดหรือกลับมา */
-function handleCameraStatus(data) {
-  const status = data.status || {};
-
-  if (data.alive) {
-    showAlert(el.cameraError, null);
-    setText(el.detectStatus, 'กำลังรับภาพสด');
-    return;
-  }
-
-  // กล้องหลุด - บอกให้ชัดว่าเกิดอะไรขึ้นและระบบกำลังทำอะไรอยู่
-  // ไม่ปล่อยให้ภาพค้างเงียบ ๆ จนผู้ใช้นึกว่ายังปกติ
-  setText(el.detectStatus, 'กล้องไม่ส่งภาพ');
-  showAlert(
-    el.cameraError,
-    'กล้อง "' + (status.name || data.camera) + '" ไม่ส่งภาพแล้ว\n' +
-    'สาเหตุ: ' + (status.error || 'ไม่ทราบ') + '\n' +
-    'ต่อใหม่ไปแล้ว ' + (status.reconnects || 0) + ' ครั้ง — ระบบจะพยายามต่อใหม่ให้เองเรื่อย ๆ'
-  );
-}
-
-/** รับหนึ่งเฟรมจาก backend มาวาดลง canvas แล้วอัปเดตกรอบ */
-async function handleStreamFrame(buffer) {
-  let decoded;
-  try {
-    decoded = decodeStreamMessage(buffer);
-  } catch (err) {
-    showAlert(el.cameraError, 'อ่านข้อมูลเฟรมไม่สำเร็จ: ' + err.message);
-    return;
-  }
-
-  const meta = decoded.meta;
-
-  // ---- วาดภาพลง canvas ----
-  // ใช้ createImageBitmap เพราะถอดรหัส JPEG นอก main thread ได้
-  // เร็วกว่าการสร้าง <img> แล้วรอ onload มาก และไม่ต้องคอย revoke object URL
-  let bitmap;
-  try {
-    bitmap = await createImageBitmap(new Blob([decoded.jpeg], { type: 'image/jpeg' }));
-  } catch (err) {
-    return; // เฟรมเสียหนึ่งเฟรมไม่ใช่เรื่องใหญ่ รอเฟรมถัดไป
-  }
-
-  if (el.streamCanvas.width !== bitmap.width || el.streamCanvas.height !== bitmap.height) {
-    el.streamCanvas.width = bitmap.width;
-    el.streamCanvas.height = bitmap.height;
-    // ตั้งสัดส่วนกล่องตามขนาดจริงที่กล้องส่งมา ไม่ได้ hardcode ไว้
-    // ถ้าเปลี่ยนไปใช้ /stream1 หรือเปลี่ยนรุ่นกล้อง สัดส่วนจะปรับตามเอง
-    applyAspectRatio(bitmap.width, bitmap.height);
-    syncOverlaySize();
-    setText(el.statResolution, bitmap.width + ' × ' + bitmap.height);
-  }
-
-  rtsp.ctx.drawImage(bitmap, 0, 0);
-  bitmap.close();
-
-  // ---- อัปเดตตัวเลขสถานะ (ทำทุกเฟรม เพราะภาพเปลี่ยนทุกเฟรม) ----
-  detection.lastSourceSize = meta.source_size || null;
-
-  setText(el.statSentSize, meta.source_size ? meta.source_size[0] + ' × ' + meta.source_size[1] : null);
-  setText(el.statLatency, meta.frame_age_ms + ' ms');
-
-  // อัตราสามค่าที่วัดได้จริง (เฟส 7) - ดูได้ทันทีว่าขั้นไหนเป็นคอขวด
-  if (meta.fps) {
-    el.statRatesBox.hidden = false;
-    setText(el.statRates, meta.fps.capture + ' / ' + meta.fps.detect + ' / ' + meta.fps.stream);
-  }
-
-  recordStreamFrame();
-
-  // ---- อัปเดตกรอบ "เฉพาะตอนได้ผลตรวจชุดใหม่" (หัวใจของเฟส 7) ----
-  //
-  // ภาพมาที่ STREAM_FPS (เช่น 15) แต่ผลตรวจมาที่ DETECT_FPS (เช่น 5)
-  // เฟรมส่วนใหญ่จึงแนบผลชุดเดิมมาด้วย (is_fresh=false)
-  //
-  // ถ้าเอาผลเดิมมา updateRenderTargets ซ้ำทุกเฟรม กรอบจะไม่เสียหายอะไร
-  // แต่เปลืองเปล่า ๆ และทำให้ตัวเลข "โหวต" กระพริบ
-  // ช่วงที่ไม่มีผลใหม่ วงวาดด้วย requestAnimationFrame จะ interpolate ต่อเอง
-  // ซึ่งเป็นกลไกที่ทำไว้ตั้งแต่เฟส 3 อยู่แล้ว
-  if (meta.is_fresh) {
-    const tracks = meta.tracks || [];
-    const knownCount = tracks.filter((t) => t.identity_state === 'recognized').length;
-
-    setText(el.statProcess, (meta.detect_ms + meta.identify_ms).toFixed(1) +
-      ' ms (ตรวจ ' + meta.detect_ms + ' + จดจำ ' + meta.identify_ms + ')');
-    setText(el.statFaces, meta.detected_count + ' คน');
-    setText(el.statTracks, tracks.length + ' track');
-    setText(el.statKnown, knownCount + ' / ' + tracks.length + ' คน');
-
-    updateRenderTargets(tracks);
-  }
-
-  // ---- ผลตรวจเก่าเกินไป: ค่อย ๆ จางกรอบลง ----
-  // สื่อให้ผู้ใช้รู้ว่าตำแหน่งที่เห็นเป็นการเดาต่อ ไม่ใช่ผลสด
-  // (เช่นตอน AI ช้าลงเพราะคนเยอะ หรือ DETECT_FPS ถูกตั้งไว้ต่ำมาก)
-  setStaleFade(Boolean(meta.is_stale));
-}
-
-/**
- * ตั้งเป้าหมายความจางของกรอบทั้งหมด เมื่อผลตรวจเก่าเกินไป
- *
- * ใช้เป็น "ตัวคูณรวม" แยกต่างหาก ไม่ไปแก้ targetAlpha ของแต่ละกรอบ
- * เพราะค่านั้นเป็นของระบบจดจำใบหน้า (กรอบที่ backend ค้างไว้ก็จางอยู่แล้ว)
- * ถ้าไปคูณทับกัน ค่าจะเพี้ยนสะสมทุกครั้งที่สลับสถานะ
- *
- * ตัวคูณนี้จะถูกไล่เข้าหาเป้าหมายทีละนิดในวงวาด จึงจางแบบนุ่มนวลไม่กระตุก
- */
-function setStaleFade(stale) {
-  render.staleTarget = stale ? STALE_ALPHA : 1;
-}
-
-/** นับ fps ของภาพที่ได้รับจริงจาก backend */
-function recordStreamFrame() {
-  const now = performance.now();
-  rtsp.frameTimestamps.push(now);
-  while (rtsp.frameTimestamps.length && now - rtsp.frameTimestamps[0] > 2000) {
-    rtsp.frameTimestamps.shift();
-  }
-  const span = now - rtsp.frameTimestamps[0];
-  if (span > 500 && rtsp.frameTimestamps.length > 1) {
-    const fps = ((rtsp.frameTimestamps.length - 1) * 1000) / span;
-    setText(el.statFps, fps.toFixed(1) + ' fps');
-  }
-}
-
-function stopStream() {
-  rtsp.running = false;
-
-  if (rtsp.socket) {
-    rtsp.socket.close(1000, 'ผู้ใช้หยุดดูภาพ');
-    rtsp.socket = null;
-  }
-
-  stopRenderLoop();
-
-  el.videoIdle.hidden = false;
-  el.streamCanvas.hidden = true;
-  el.btnStream.textContent = 'เริ่มดูภาพสด';
-  el.btnStream.classList.add('btn--primary');
-
-  setText(el.detectStatus, 'ปิดอยู่');
-  ['statResolution', 'statSentSize', 'statFps', 'statProcess',
-   'statFaces', 'statTracks', 'statKnown', 'statRenderFps', 'statLatency'
-  ].forEach((key) => setText(el[key], null));
-}
-
-el.btnStream.addEventListener('click', () => {
-  if (rtsp.socket) {
-    stopStream();
-  } else {
-    startStream();
-  }
-});
-
-// สลับกล้องระหว่างที่ดูอยู่ = ต่อใหม่ไปกล้องตัวนั้นทันที
-el.rtspSelect.addEventListener('change', () => {
-  if (rtsp.socket) {
-    stopStream();
-    startStream();
-  }
-});
-
-/** ตั้งค่าหน้าเว็บให้ตรงกับโหมดที่ backend ใช้อยู่ */
 async function applySourceMode() {
-  const rtspMode = isRtspMode();
+  const cameraMode = isCameraMode();
 
-  el.controlsWebcam.hidden = rtspMode;
-  el.controlsRtsp.hidden = !rtspMode;
+  el.modeCameras.hidden = !cameraMode;
+  el.modeWebcam.hidden = cameraMode;
 
-  if (rtspMode) {
-    el.video.hidden = true;
-    setText(el.videoIdleText, 'ยังไม่ได้เริ่มดูภาพสด');
-    setText(el.videoIdleHint, 'ภาพมาจากกล้อง IP ที่ backend ต่ออยู่ ไม่ได้ใช้กล้องของเครื่องนี้');
-    await loadCameraList();
+  if (cameraMode) {
+    await buildCameraPanels();
   } else {
-    el.video.hidden = false;
-    el.streamCanvas.hidden = true;
     setText(el.videoIdleText, 'ยังไม่ได้เปิดกล้อง');
     setText(el.videoIdleHint, 'ต้องเปิดหน้านี้ผ่าน http://localhost:3000 เท่านั้น');
   }
@@ -1395,6 +915,9 @@ async function loadHealth() {
 
     const src = data.frame_source || {};
     setText(el.frameSource, src.type ? (src.type + (src.alive ? ' (พร้อม)' : ' (ไม่พร้อม)')) : null);
+
+    // ---- สถานะกล้องแต่ละตัวแยกกัน (เฟส 8) ----
+    renderCameraHealth(src.cameras);
 
     // บอกให้ชัดว่า "ซ้าย/ขวา" ที่ระบบรายงาน หมายถึงด้านไหน
     const dirRef = (config.direction && config.direction.reference) || '—';
@@ -1456,6 +979,54 @@ async function loadHealth() {
     );
     return false;
   }
+}
+
+/**
+ * แสดงสถานะกล้องทีละตัวในการ์ดสถานะ (ข้อ 7)
+ *
+ * ต้องบอกให้ครบว่า ชื่อ / ทิศทาง / เชื่อมต่อหรือหลุด / fps
+ * เพื่อให้ดูออกจากหน้านี้ว่ากล้องตัวไหนมีปัญหา โดยไม่ต้องกดดูภาพ
+ */
+function renderCameraHealth(cameras) {
+  if (!cameras || cameras.length === 0) {
+    el.healthCamerasRow.hidden = true;
+    return;
+  }
+
+  el.healthCamerasRow.hidden = false;
+  el.healthCameras.replaceChildren();
+
+  cameras.forEach((cam) => {
+    const line = document.createElement('div');
+    line.className = 'cam-line';
+
+    const dot = document.createElement('span');
+    // เขียว = ส่งภาพอยู่ / เหลือง = ต่อได้แต่ภาพไม่มา / แดง = หลุด
+    const state = cam.alive ? 'ok' : (cam.connected ? 'pending' : 'error');
+    dot.className = 'status__dot status__dot--' + state;
+
+    const text = document.createElement('span');
+    const parts = [
+      cam.name,
+      '(' + cam.direction + ')',
+      cam.alive ? 'ส่งภาพอยู่' : (cam.connected ? 'ต่อได้แต่ภาพไม่มา' : 'หลุด'),
+    ];
+
+    // fps ที่อ่านได้จริงจากกล้องตัวนี้
+    if (cam.read_fps !== undefined && cam.read_fps !== null) {
+      parts.push(cam.read_fps + ' fps');
+    }
+    if (cam.reconnects) {
+      parts.push('ต่อใหม่ ' + cam.reconnects + ' ครั้ง');
+    }
+    if (!cam.alive && cam.error) {
+      parts.push('— ' + cam.error);
+    }
+
+    text.textContent = parts.join('  ');
+    line.append(dot, text);
+    el.healthCameras.appendChild(line);
+  });
 }
 
 /** แถวข้อความกลางตาราง ใช้ตอนกำลังโหลด / ไม่มีข้อมูล / เกิดข้อผิดพลาด */
@@ -1607,12 +1178,13 @@ async function reloadFaces() {
 
 el.btnReloadFaces.addEventListener('click', reloadFaces);
 
-// ปิดกล้องให้เรียบร้อยเมื่อออกจากหน้า ไม่ปล่อยให้ไฟกล้องค้าง
+// ปิดกล้องและช่องส่งภาพให้เรียบร้อยเมื่อออกจากหน้า ไม่ปล่อยให้ไฟกล้องค้าง
 window.addEventListener('beforeunload', () => {
   stopDetection();
-  stopRenderLoop();
+  webcamOverlay.stop();
   camera.stop();
-  if (rtsp.socket) rtsp.socket.close(1000, 'ปิดหน้าเว็บ');
+  feeders.forEach((feeder) => feeder.stop());
+  panels.forEach((panel) => panel.stop());
 });
 
 // เริ่มทำงาน
@@ -1622,11 +1194,9 @@ window.addEventListener('beforeunload', () => {
   await refreshAll();
   setInterval(refreshAll, AUTO_REFRESH_MS);
 
-  // โหมดกล้อง IP: อัปเดตสถานะกล้องใน dropdown เป็นระยะ
+  // โหมดกล้องหลายตัว: สำรวจสถานะกล้องเป็นระยะ
   // เพื่อให้เห็นทันทีเมื่อกล้องหลุดหรือกลับมา แม้ยังไม่ได้กดดูภาพ
-  if (isRtspMode()) {
-    setInterval(() => {
-      if (!rtsp.socket) loadCameraList();
-    }, AUTO_REFRESH_MS);
+  if (isCameraMode()) {
+    setInterval(refreshCameraInfo, AUTO_REFRESH_MS);
   }
 })();

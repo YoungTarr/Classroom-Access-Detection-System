@@ -29,6 +29,17 @@
    เดิมสร้าง pipeline ใหม่ทุกครั้งที่มีคนเปิดหน้าเว็บ
    ผู้ดูแลสองคนเปิดพร้อมกัน = รัน AI ซ้ำสองชุดกับภาพเดียวกัน
    ตอนนี้ตัวขับตัวเดียวทำงานให้ทุกคน ผู้ชมแค่มา "สมัครรับ" ภาพที่ส่งออกไป
+
+============================================================================
+เฟส 8: มีตัวขับหนึ่งตัวต่อหนึ่งกล้อง เดินขนานกันไป
+============================================================================
+
+    CameraRunner(door_in)   ---.
+                                >--- DetectScheduler (ประตูบานเดียว) ---> โมเดล AI
+    CameraRunner(door_out)  ---'                                          (ชุดเดียว)
+
+ทุกอย่างที่เป็น "สถานะของกล้อง" แยกกันคนละชุด (thread อ่านกล้อง, tracker, สถิติ)
+ส่วนทุกอย่างที่เป็น "โมเดล" ใช้ร่วมกันชุดเดียว (ดูรายละเอียดในหัวคลาส CameraRunner)
 """
 
 from __future__ import annotations
@@ -42,8 +53,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
-from app.core.frame_source import RTSPFrameSource
+from app.core.detect_scheduler import DetectScheduler
+from app.core.frame_source import FrameSource
 from app.core.pipeline import Pipeline
+from app.core.rate_meter import RateMeter
 from app.core.tracker import tracks_to_dicts
 from app.identify.base import Identifier
 
@@ -68,35 +81,6 @@ def encode_stream_message(meta: dict[str, Any], jpeg: bytes) -> bytes:
     return struct.pack(STREAM_HEADER_FORMAT, len(payload)) + payload + jpeg
 
 
-class RateMeter:
-    """วัดอัตราที่เกิดขึ้น "จริง" ของแต่ละขั้น
-
-    ต้องวัดของจริง ไม่ใช่รายงานค่าที่ตั้งไว้ใน config
-    เพราะถ้าเครื่องทำไม่ทันค่าที่ตั้ง ผู้ใช้ต้องเห็นตัวเลขที่ทำได้จริง
-    ไม่งั้นจะจูนอะไรไม่ถูกเลย
-    """
-
-    def __init__(self, window_seconds: float = 3.0) -> None:
-        self.window = window_seconds
-        self._timestamps: list[float] = []
-
-    def tick(self) -> None:
-        now = time.monotonic()
-        self._timestamps.append(now)
-        cutoff = now - self.window
-        while self._timestamps and self._timestamps[0] < cutoff:
-            self._timestamps.pop(0)
-
-    @property
-    def fps(self) -> float:
-        if len(self._timestamps) < 2:
-            return 0.0
-        span = self._timestamps[-1] - self._timestamps[0]
-        if span <= 0:
-            return 0.0
-        return (len(self._timestamps) - 1) / span
-
-
 @dataclass
 class DetectionSnapshot:
     """ผลตรวจจับหนึ่งชุด ใช้ร่วมกันโดยผู้ชมทุกคน
@@ -116,13 +100,50 @@ class DetectionSnapshot:
 
 
 class CameraRunner:
-    """ตัวขับสตรีมของกล้องหนึ่งตัว"""
+    """ตัวขับสตรีมของกล้องหนึ่งตัว
 
-    def __init__(self, source: RTSPFrameSource, identifier: Identifier | None) -> None:
+    ============================================================================
+    อะไรเป็นของกล้องตัวนี้ อะไรใช้ร่วมกับกล้องตัวอื่น (เฟส 8)
+    ============================================================================
+
+    ของกล้องตัวนี้คนเดียว (สร้างใหม่ทุกครั้งที่เพิ่มกล้อง):
+        source      thread อ่านกล้อง + watchdog ของตัวเอง
+        pipeline    เพราะตัวติดตาม (tracker) จำ track ไว้ข้างใน
+                    ถ้าใช้ร่วมกัน ใบหน้าจากคนละกล้องจะถูกจับคู่กันมั่ว
+                    คนที่เดินผ่านกล้องขาเข้าจะกลายเป็น track เดียวกับคนที่กล้องขาออก
+        มาตรวัด     สถิติต้องแยกกัน ไม่งั้นดูไม่ออกว่ากล้องตัวไหนมีปัญหา
+        ผู้ชม       คนที่เปิดดูกล้องตัวนี้
+
+    ใช้ร่วมกันทุกกล้อง (**ห้ามสร้างใหม่ต่อกล้องเด็ดขาด**):
+        identifier  ข้างในมีทั้งโมเดลจดจำใบหน้าและ FAISS index
+                    ถ้าสร้างแยกต่อกล้องจะกิน RAM เพิ่มหลายร้อย MB โดยเปล่าประโยชน์
+                    ซึ่ง Pi 5 ไม่มีให้เสีย เพราะต้องแบ่งให้ PostgreSQL
+                    และการถอดรหัสวิดีโอสองสตรีมด้วย
+                    ที่แชร์ได้เพราะคลังเวกเตอร์เป็นข้อมูล "อ่านอย่างเดียว"
+                    ส่วนที่เป็นสถานะคือผลโหวต ซึ่งเก็บอยู่ใน track ของแต่ละ pipeline
+        detector    โมเดลตรวจจับ เป็น instance เดียวระดับโมดูล (face/detector.py)
+                    Pipeline รับมาใช้ต่อ ไม่ได้สร้างใหม่
+        scheduler   ประตูคิวตรวจจับ ทำให้สองกล้องผลัดกันใช้ CPU แทนที่จะแย่งกัน
+    """
+
+    def __init__(
+        self,
+        source: FrameSource,
+        identifier: Identifier | None,
+        scheduler: DetectScheduler,
+    ) -> None:
+        # รับ FrameSource แบบกว้าง ๆ ไม่เจาะจงว่าเป็น RTSP โดยตั้งใจ
+        # เพราะกล้องตัวหนึ่งอาจเป็นเว็บแคมที่เบราว์เซอร์ป้อนภาพให้ (เฟส 8)
+        # โค้ดในคลาสนี้ใช้แค่ source.read() กับ source.camera จึงไม่ต้องรู้ชนิด
         self.source = source
+        self.camera = source.camera
         self.camera_id = source.camera.id
 
+        # ประตูคิวที่ใช้ร่วมกับกล้องตัวอื่น (ดูคำอธิบายใน core/detect_scheduler.py)
+        self.scheduler = scheduler
+
         # pipeline ตัวเดียวต่อกล้อง (ตัวติดตามจำ track ไว้ข้างใน จึงห้ามใช้ร่วมข้ามกล้อง)
+        # แต่ตัวตรวจจับและตัวระบุตัวตนที่อยู่ข้างใน pipeline เป็นตัวที่แชร์กันทั้งระบบ
         self.pipeline = Pipeline(identifier=identifier)
 
         self._detect_task: asyncio.Task | None = None
@@ -142,12 +163,18 @@ class CameraRunner:
         # เฟรมสตรีมที่ผ่านไปแล้วนับตั้งแต่ได้ผลตรวจชุดล่าสุด
         self._frames_since_detection = 0
 
-        # มาตรวัดอัตราจริงของทั้งสามขั้น
+        # มาตรวัดอัตราจริงของทั้งสามขั้น (ของกล้องตัวนี้เท่านั้น)
         self.capture_meter = RateMeter()
         self.detect_meter = RateMeter()
         self.stream_meter = RateMeter()
 
         self._last_capture_frame_id = -1
+
+        # เวลาที่ใช้แต่ละขั้นในรอบล่าสุด เก็บไว้รายงานทาง /api/health
+        # (ในข้อความ WebSocket มีอยู่แล้ว แต่ health ต้องดูได้โดยไม่ต้องเปิดหน้าเว็บ)
+        self._last_detect_ms = 0.0
+        self._last_identify_ms = 0.0
+        self._last_latency_ms = 0.0
 
     # ------------------------------------------------------------------
     # วงจรชีวิต
@@ -163,11 +190,14 @@ class CameraRunner:
             self._stream_loop(), name=f"stream-{self.camera_id}"
         )
         logger.info(
-            "เริ่มตัวขับสตรีมกล้อง %s (capture=%d detect=%d stream=%d fps)",
+            "เริ่มตัวขับสตรีมกล้อง %s [%s] (capture=%d detect=%d/กล้อง stream=%d fps, "
+            "เพดานตรวจจับรวมทั้งระบบ %d fps)",
             self.camera_id,
+            self.camera.source,
             settings.rates.capture_fps,
             settings.rates.detect_fps,
             settings.rates.stream_fps,
+            self.scheduler.total_fps,
         )
 
     async def stop(self) -> None:
@@ -211,10 +241,13 @@ class CameraRunner:
     # ลูปตรวจจับ (ช้า)
     # ------------------------------------------------------------------
     async def _detect_loop(self) -> None:
-        """ตรวจจับ+จดจำใบหน้าที่อัตรา DETECT_FPS
+        """ตรวจจับ+จดจำใบหน้าที่อัตรา DETECT_FPS (ต่อกล้อง)
 
         ทำงานแยกจากการส่งภาพโดยสิ้นเชิง ถ้าลูปนี้ช้าลง ภาพที่หน้าเว็บ
         ก็ยังลื่นเท่าเดิม แค่กรอบจะอัปเดตห่างขึ้นเท่านั้น
+
+        ตั้งแต่เฟส 8 ก่อนจะตรวจต้องขอคิวจาก DetectScheduler ที่แชร์กับกล้องตัวอื่น
+        เพื่อให้สองกล้องผลัดกันใช้ CPU ทีละตัว ไม่ใช่แย่งกันจนช้าลงทั้งคู่
         """
         interval = 1.0 / max(1, settings.rates.detect_fps)
         last_frame_id = -1
@@ -226,12 +259,17 @@ class CameraRunner:
                 frame = self.source.read()
 
                 # ตรวจเฉพาะเฟรมใหม่ ถ้ายังเป็นเฟรมเดิมก็ไม่ต้องเสียแรงตรวจซ้ำ
+                #
+                # **ขอคิวหลังจากเห็นว่ามีของทำจริงแล้วเท่านั้น**
+                # ถ้าขอคิวไว้ก่อนแล้วค่อยมาพบว่าไม่มีเฟรมใหม่ กล้องที่ถูกถอดปลั๊ก
+                # จะคอยจองคิวเปล่า ๆ แล้วถ่วงกล้องที่ยังทำงานอยู่ (ผิดข้อ 3 ของเฟสนี้)
                 if frame is not None and frame.frame_id != last_frame_id:
                     last_frame_id = frame.frame_id
 
-                    # งานหนัก - ต้องอยู่ใน thread แยก ไม่งั้นบล็อก event loop
-                    # ทำให้การส่งภาพและ request อื่น ๆ ค้างตามไปด้วย
-                    result = await asyncio.to_thread(self.pipeline.process, frame)
+                    async with self.scheduler.slot(self.camera_id):
+                        # งานหนัก - ต้องอยู่ใน thread แยก ไม่งั้นบล็อก event loop
+                        # ทำให้การส่งภาพของกล้องทุกตัวและ request อื่น ๆ ค้างตามไปด้วย
+                        result = await asyncio.to_thread(self.pipeline.process, frame)
 
                     self._latest_detection = DetectionSnapshot(
                         frame_id=result.frame_id,
@@ -246,12 +284,20 @@ class CameraRunner:
                     self._frames_since_detection = 0
                     self.detect_meter.tick()
 
+                    self._last_detect_ms = result.detect_ms
+                    self._last_identify_ms = result.identify_ms
+                    self._last_latency_ms = (time.monotonic() - frame.received_at) * 1000.0
+
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - ลูปนี้ต้องไม่ตายกลางคัน
+                # ต้องกลืน error ไว้ในกล้องตัวนี้ ห้ามให้ลอยออกไป
+                # ไม่งั้น task ของกล้องตัวนี้จะตาย แล้วกล้องตัวนี้จะเงียบไปเฉย ๆ
+                # (ส่วนกล้องตัวอื่นไม่กระทบ เพราะเป็น task แยกกันคนละตัว)
                 logger.exception("ลูปตรวจจับของกล้อง %s ผิดพลาด: %s", self.camera_id, exc)
 
             # หน่วงให้ครบรอบ โดยหักเวลาที่ใช้ไปแล้วออก
+            # (รวมเวลาที่เสียไปกับการรอคิวด้วย จึงไม่ช้าซ้ำซ้อนเมื่อมีกล้องสองตัว)
             elapsed = time.monotonic() - started
             await asyncio.sleep(max(0.0, interval - elapsed))
 
@@ -336,7 +382,13 @@ class CameraRunner:
 
         meta: dict[str, Any] = {
             "type": "frame",
+            # ทุกข้อความต้องบอกให้ชัดว่าเป็นของกล้องตัวไหน (ข้อบังคับของเฟส 8)
+            # ถึงจะใช้ WebSocket แยกช่องต่อกล้องแล้วก็ยังต้องมี เพราะหน้าเว็บ
+            # ต้องยืนยันได้ว่าไม่ได้เอาภาพของกล้องหนึ่งไปวาดในจออีกตัว
             "camera": self.camera_id,
+            "camera_name": self.camera.name,
+            "direction": self.camera.direction,
+            "camera_source": self.camera.source,
             "frame_id": self._stream_frame_id,
             "is_fresh": is_fresh,
             "is_stale": is_stale,
@@ -392,11 +444,16 @@ class CameraRunner:
     # สถานะ
     # ------------------------------------------------------------------
     def status(self) -> dict[str, Any]:
+        """สถิติของกล้องตัวนี้ตัวเดียว ไม่มีค่าที่ปนกับกล้องตัวอื่นเลย"""
         return {
             "camera": self.camera_id,
+            "name": self.camera.name,
+            "direction": self.camera.direction,
+            "source": self.camera.source,
             "viewers": len(self._subscribers),
             "configured_fps": {
                 "capture": settings.rates.capture_fps,
+                # detect เป็นค่า "ต่อกล้อง" ส่วนเพดานรวมอยู่ในสถานะของ scheduler
                 "detect": settings.rates.detect_fps,
                 "stream": settings.rates.stream_fps,
             },
@@ -405,5 +462,9 @@ class CameraRunner:
                 "detect": round(self.detect_meter.fps, 1),
                 "stream": round(self.stream_meter.fps, 1),
             },
+            # เวลาที่ใช้ในรอบตรวจล่าสุดของกล้องตัวนี้
+            "detect_ms": round(self._last_detect_ms, 1),
+            "identify_ms": round(self._last_identify_ms, 1),
+            "latency_ms": round(self._last_latency_ms, 1),
             "processed_frames": self.pipeline.processed_frames,
         }

@@ -30,9 +30,10 @@ from app.config import settings
 from app.core.frame_source import (
     BrowserFrameSource,
     FrameDecodeError,
-    RTSPFrameSource,
+    FrameSource,
     create_frame_sources,
 )
+from app.core.detect_scheduler import DetectScheduler
 from app.core.pipeline import create_pipeline
 from app.core.stream_runner import CameraRunner
 from app.core.tracker import tracks_to_dicts
@@ -136,23 +137,53 @@ async def lifespan(_: FastAPI):
     if settings.stream.source == "rtsp":
         for camera in settings.rtsp.cameras:
             logger.info(
-                "กล้อง %s (%s) ทิศทาง %s -> %s  [%s]",
+                "กล้อง %s (%s) ทิศทาง %s ชนิด %s -> %s  [%s]",
                 camera.id,
                 camera.name,
                 camera.direction,
+                camera.source,
                 camera.safe_url(),  # ปิดบังรหัสผ่านไว้แล้ว
                 "เปิดใช้งาน" if camera.enabled else "ปิดอยู่",
             )
 
-    # ---- ตัวขับสตรีมหนึ่งตัวต่อหนึ่งกล้อง (เฟส 7) ----
+    # ---- ประตูคิวตรวจจับที่กล้องทุกตัวใช้ร่วมกัน (เฟส 8) ----
+    # สร้างก่อนตัวขับสตรีม เพราะทุกตัวต้องได้ตัวเดียวกันนี้ไป
+    app.state.detect_scheduler = DetectScheduler(settings.rates.detect_fps_total)
+
+    # ---- ตัวขับสตรีมหนึ่งตัวต่อหนึ่งกล้อง (เฟส 7 + 8) ----
     # สร้างตอนสตาร์ท ไม่ใช่ตอนมีคนเปิดหน้าเว็บ เพราะระบบต้องรู้ว่าใครเดินผ่าน
     # แม้ตอนนั้นจะไม่มีใครเฝ้าดูอยู่เลยก็ตาม
+    #
+    # **จุดสำคัญที่สุดของเฟส 8**: ส่ง app.state.identifier ตัวเดิมให้ทุกกล้อง
+    # ห้ามเรียก create_identifier() ซ้ำในลูปนี้เด็ดขาด เพราะข้างในมีทั้งโมเดล
+    # จดจำใบหน้าและ FAISS index ซึ่งกินหลายร้อย MB ต่อชุด
+    # (ส่วนโมเดลตรวจจับเป็น instance เดียวระดับโมดูลอยู่แล้ว - face/detector.py)
+    #
+    # สร้างให้ "ทุกกล้อง" ไม่ว่าภาพจะมาจาก RTSP หรือจากเว็บแคมที่เบราว์เซอร์ป้อนให้
+    # เงื่อนไขเดียวคือแหล่งภาพนั้นผูกกับกล้องตัวหนึ่ง (source.camera ไม่เป็น None)
+    # ซึ่งกันไม่ให้โหมดเว็บแคมเดี่ยว (FRAME_SOURCE=browser) ถูกสร้าง runner ไปด้วย
     app.state.camera_runners = {}
     for camera_id, source in app.state.frame_sources.items():
-        if isinstance(source, RTSPFrameSource):
-            runner = CameraRunner(source, identifier=app.state.identifier)
-            await runner.start()
-            app.state.camera_runners[camera_id] = runner
+        if getattr(source, "camera", None) is None:
+            continue
+
+        runner = CameraRunner(
+            source,
+            identifier=app.state.identifier,
+            scheduler=app.state.detect_scheduler,
+        )
+        await runner.start()
+        app.state.camera_runners[camera_id] = runner
+
+    if app.state.camera_runners:
+        logger.info(
+            "เปิดใช้งานกล้องทั้งหมด %d ตัว: %s "
+            "(ตรวจจับกล้องละ %d fps เพดานรวมทั้งระบบ %d fps, โมเดลและคลังใบหน้าใช้ร่วมกันชุดเดียว)",
+            len(app.state.camera_runners),
+            ", ".join(app.state.camera_runners),
+            settings.rates.detect_fps,
+            settings.rates.detect_fps_total,
+        )
 
     yield
 
@@ -228,14 +259,47 @@ def health(response: Response) -> dict[str, Any]:
         "alive": any(s.is_alive() for s in sources.values()),
     }
 
+    # โหมดเว็บแคมเดี่ยว (ไม่มีกล้องในระบบ) รายงานแค่จำนวนเฟรมที่รับมา
     browser_source = sources.get("browser")
-    if isinstance(browser_source, BrowserFrameSource):
+    if isinstance(browser_source, BrowserFrameSource) and browser_source.camera is None:
         source_status["received_frames"] = browser_source.received_count
 
-    # โหมด rtsp รายงานสถานะทีละกล้อง เพื่อให้รู้ว่าตัวไหนหลุด
-    rtsp_sources = [s for s in sources.values() if isinstance(s, RTSPFrameSource)]
-    if rtsp_sources:
-        source_status["cameras"] = [s.status() for s in rtsp_sources]
+    # โหมดกล้องหลายตัว: รายงานสถานะ "ทีละกล้อง" เพื่อให้รู้ว่าตัวไหนหลุด (เฟส 8)
+    #
+    # ต้องแยกกันจริง ๆ ไม่ใช่สรุปรวมว่า "กล้องพร้อม/ไม่พร้อม"
+    # เพราะเกณฑ์ของเฟสนี้คือถอดปลั๊กตัวหนึ่งแล้วต้องดูออกว่าเป็นตัวไหน
+    # ส่วนอีกตัวต้องยังรายงานว่าปกติอยู่
+    #
+    # รวมกล้องทุกชนิด (rtsp และ browser) ด้วยโค้ดชุดเดียว เพราะ status()
+    # ของทั้งสองชนิดคืนรูปแบบเดียวกัน (ดู core/frame_source.py)
+    camera_sources: list[FrameSource] = [
+        s for s in sources.values() if getattr(s, "camera", None) is not None
+    ]
+    if camera_sources:
+        runners = getattr(app.state, "camera_runners", {}) or {}
+        cameras_status = []
+
+        for source in camera_sources:
+            entry = source.status()
+            runner = runners.get(source.camera.id)
+            if runner is not None:
+                # รวมสถิติของตัวขับสตรีมเข้าไปด้วย จะได้เห็นทั้งฝั่งรับภาพและฝั่งประมวลผล
+                stats = runner.status()
+                entry["fps"] = stats["measured_fps"]
+                entry["detect_ms"] = stats["detect_ms"]
+                entry["identify_ms"] = stats["identify_ms"]
+                entry["latency_ms"] = stats["latency_ms"]
+                entry["viewers"] = stats["viewers"]
+            cameras_status.append(entry)
+
+        source_status["cameras"] = cameras_status
+        source_status["camera_count"] = len(cameras_status)
+        source_status["cameras_alive"] = sum(1 for c in cameras_status if c["alive"])
+
+        scheduler = getattr(app.state, "detect_scheduler", None)
+        if scheduler is not None:
+            # ดูได้ว่ากล้องแต่ละตัวได้คิวตรวจไปกี่ครั้ง (ต้องใกล้เคียงกัน = แบ่งกันยุติธรรม)
+            source_status["detect_scheduler"] = scheduler.status()
 
     db_ok = db_health.connected and db_health.error is None
     face_ok = face_status["loaded"] and face_status["recognition_loaded"]
@@ -254,7 +318,7 @@ def health(response: Response) -> dict[str, Any]:
         "app": {
             "name": settings.app.name,
             "version": settings.app.version,
-            "phase": 7,
+            "phase": 8,
         },
         "database": {
             "connected": db_health.connected,
@@ -351,10 +415,15 @@ def get_config() -> dict[str, Any]:
 def list_cameras() -> dict[str, Any]:
     """รายการกล้อง IP พร้อมสถานะการเชื่อมต่อของแต่ละตัว
 
-    หน้าเว็บใช้สร้างรายการให้ผู้ใช้เลือกดู และใช้แสดงว่ากล้องตัวไหนหลุดอยู่
-    URL ที่ส่งออกไปถูกปิดบังรหัสผ่านไว้แล้วเสมอ
+    หน้าเว็บใช้ endpoint นี้ "สร้างจอ" ให้ครบทุกกล้องตอนเปิดหน้า
+    (ตั้งแต่เฟส 8 ไม่มี dropdown ให้เลือกแล้ว แต่แสดงทุกตัวพร้อมกัน)
+    ลำดับที่คืนออกไปเรียงตาม CAMERA_IDS ใน .env เสมอ เพื่อให้ตำแหน่งจอไม่สลับที่
+    ทุกครั้งที่รีเฟรชหน้าเว็บ
+
+    URL ที่ส่งออกไปถูกปิดบังรหัสผ่านไว้แล้วเสมอ (safe_url)
     """
     sources = getattr(app.state, "frame_sources", {}) or {}
+    runners = getattr(app.state, "camera_runners", {}) or {}
 
     cameras = []
     for camera in settings.rtsp.cameras:
@@ -366,13 +435,24 @@ def list_cameras() -> dict[str, Any]:
             "url": camera.safe_url(),
         }
 
+        entry["source"] = camera.source
+
         source = sources.get(camera.id)
-        if isinstance(source, RTSPFrameSource):
+        if source is not None and getattr(source, "camera", None) is not None:
             entry.update(source.status())
+
+        runner = runners.get(camera.id)
+        if runner is not None:
+            entry["fps"] = runner.status()["measured_fps"]
 
         cameras.append(entry)
 
-    return {"source": settings.stream.source, "total": len(cameras), "cameras": cameras}
+    return {
+        "source": settings.stream.source,
+        "total": len(cameras),
+        "enabled": sum(1 for c in cameras if c["enabled"]),
+        "cameras": cameras,
+    }
 
 
 @app.get("/api/members", tags=["สมาชิก"])
@@ -451,13 +531,17 @@ async def websocket_detect(websocket: WebSocket) -> None:
         logger.warning("ปิด WebSocket เพราะโมเดลไม่พร้อม: %s", reason)
         return
 
+    # endpoint นี้ให้บริการเฉพาะ "โหมดเว็บแคมเดี่ยว" เท่านั้น (เฟส 2-5)
+    # ส่วนเว็บแคมที่ทำหน้าที่เป็นกล้องตัวหนึ่งในระบบกล้องหลายตัว ใช้ /ws/feed แทน
     frame_source = getattr(app.state, "frame_sources", {}).get("browser")
-    if not isinstance(frame_source, BrowserFrameSource):
+    if not isinstance(frame_source, BrowserFrameSource) or frame_source.camera is not None:
         await websocket.send_json({
             "type": "error",
             "message": (
                 f"ขณะนี้ระบบตั้งค่า FRAME_SOURCE={settings.stream.source} "
-                "จึงไม่รับภาพจากเบราว์เซอร์ (ต้องตั้งเป็น browser)"
+                "จึงไม่รับภาพทาง /ws/detect\n"
+                "ถ้าต้องการใช้เว็บแคมเป็นกล้องตัวหนึ่งในระบบกล้องหลายตัว "
+                "ให้ตั้ง CAMERA_<ID>_SOURCE=browser แล้วส่งภาพไปที่ /ws/feed?camera=<id> แทน"
             ),
         })
         await websocket.close(code=1011)
@@ -525,6 +609,147 @@ async def websocket_detect(websocket: WebSocket) -> None:
 
 
 # =============================================================================
+# WebSocket: เบราว์เซอร์ป้อนภาพเว็บแคมเข้ามาเป็น "กล้องตัวหนึ่ง" (เฟส 8)
+# =============================================================================
+#
+# ใช้กับกล้องที่ตั้ง CAMERA_<ID>_SOURCE=browser เท่านั้น
+#
+# ต่างจาก /ws/detect ตรงที่ endpoint นี้ **ไม่ส่งผลตรวจจับกลับไป**
+# หน้าที่มีแค่รับภาพแล้วหย่อนลงแหล่งภาพของกล้องตัวนั้น
+# ส่วนภาพกับผลตรวจจะกลับไปหาหน้าเว็บทาง /ws/stream?camera=<id> เหมือนกล้อง IP ทุกตัว
+#
+#     เบราว์เซอร์ --(/ws/feed)--> BrowserFrameSource --> CameraRunner --> AI
+#          ^                                                              |
+#          '-------------------(/ws/stream)-----------------------------'
+#
+# ทำไมถึงวนกลับแบบนี้แทนที่จะให้เบราว์เซอร์วาดกรอบเองจากภาพในเครื่อง:
+#
+#   1. ภาพที่ผู้ใช้เห็น คือภาพเฟรมเดียวกับที่ AI ตรวจจริง ๆ เสมอ
+#      ไม่มีทางที่กรอบจะไปวาดทับภาพคนละเฟรมกัน
+#   2. หน้าเว็บมองกล้องสองตัวเหมือนกันเป๊ะ ใช้โค้ดแสดงผลชุดเดียว
+#      ไม่ต้องมี if แยกชนิดกล้องกระจายไปทั่ว
+#   3. พอกล้อง Tapo ตัวที่สองมาถึง เปลี่ยนแค่ .env แล้วหน้าเว็บไม่ต้องแก้เลย
+#
+# ต้นทุนคือภาพเดินทางขึ้นแล้วลงสองเที่ยว ซึ่งยอมรับได้เพราะเป็นการทดแทนชั่วคราว
+# และเครื่องที่เปิดหน้าเว็บกับ backend มักอยู่ในวง LAN เดียวกัน
+# =============================================================================
+
+
+@app.websocket("/ws/feed")
+async def websocket_feed(websocket: WebSocket) -> None:
+    """รับภาพเว็บแคมจากเบราว์เซอร์ เข้าเป็นเฟรมของกล้องที่ระบุ
+
+    รูปแบบข้อความเข้า : binary = [frame_id uint32 LE][JPEG bytes] (เหมือน /ws/detect)
+    รูปแบบข้อความออก : JSON {"type": "ack", "frame_id": n}
+
+    ต้องตอบ ack กลับไปทุกเฟรม เพื่อให้เบราว์เซอร์ใช้คุมจังหวะ (backpressure)
+    คือส่งเฟรมถัดไปเมื่อเฟรมก่อนหน้าถึงปลายทางแล้วเท่านั้น
+    ถ้าไม่มี ack เบราว์เซอร์จะยิงตามนาฬิกาของตัวเองโดยไม่รู้ว่าปลายทางรับทันไหม
+    แล้วเฟรมจะไปกองอยู่ในบัฟเฟอร์ของ WebSocket จนภาพช้ากว่าความจริงเรื่อย ๆ
+    """
+    await websocket.accept()
+
+    client = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "?"
+    sources = getattr(app.state, "frame_sources", {}) or {}
+    requested = websocket.query_params.get("camera")
+
+    # ---- เลือกกล้องปลายทาง ----
+    if not requested:
+        await websocket.send_json({
+            "type": "error",
+            "message": "ต้องระบุกล้องปลายทาง เช่น /ws/feed?camera=door_out",
+        })
+        await websocket.close(code=1008)
+        return
+
+    source = sources.get(requested)
+
+    # ต้องเป็นกล้องที่ตั้งไว้ว่ารับภาพจากเบราว์เซอร์เท่านั้น
+    # ถ้าปล่อยให้ป้อนภาพเข้ากล้อง IP ได้ ภาพจากเว็บแคมจะไปทับภาพกล้องจริง
+    # ซึ่งเป็นช่องโหว่ที่อันตรายมากสำหรับระบบบันทึกคนเข้า-ออก
+    if not isinstance(source, BrowserFrameSource) or source.camera is None:
+        known = [
+            cid for cid, s in sources.items()
+            if isinstance(s, BrowserFrameSource) and s.camera is not None
+        ]
+        await websocket.send_json({
+            "type": "error",
+            "message": (
+                f"กล้อง {requested!r} ไม่ได้ตั้งค่าให้รับภาพจากเบราว์เซอร์\n"
+                f"กล้องที่รับได้ตอนนี้: {', '.join(known) or 'ไม่มีเลย'}\n"
+                f"(ตั้ง CAMERA_{requested.upper()}_SOURCE=browser ในไฟล์ .env)"
+            ),
+        })
+        await websocket.close(code=1011)
+        return
+
+    if not face_detector.is_loaded:
+        reason = getattr(app.state, "face_model_error", None) or "โมเดลยังไม่ถูกโหลด"
+        await websocket.send_json({
+            "type": "error",
+            "message": f"ระบบตรวจจับใบหน้าไม่พร้อม: {reason}",
+        })
+        await websocket.close(code=1011)
+        return
+
+    source.attach_feeder()
+    logger.info(
+        "WebSocket /ws/feed เริ่มป้อนภาพให้กล้อง %s จาก %s", source.camera.id, client
+    )
+
+    # บอกเบราว์เซอร์ว่าพร้อมรับแล้ว จะได้เริ่มส่งเฟรมแรกได้เลย
+    await websocket.send_json({
+        "type": "ready",
+        "camera": source.camera.id,
+        "camera_name": source.camera.name,
+        "direction": source.camera.direction,
+    })
+
+    try:
+        while True:
+            message = await websocket.receive_bytes()
+
+            if len(message) <= FRAME_HEADER_SIZE:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"ข้อมูลสั้นเกินไป ({len(message)} ไบต์) ไม่มีส่วนภาพ",
+                })
+                continue
+
+            (frame_id,) = struct.unpack(FRAME_HEADER_FORMAT, message[:FRAME_HEADER_SIZE])
+
+            try:
+                # แค่หย่อนเฟรมลงแหล่งภาพ ไม่ประมวลผลตรงนี้
+                # CameraRunner ของกล้องตัวนี้จะมาหยิบไปตรวจตามจังหวะของมันเอง
+                # (ซึ่งเข้าคิวร่วมกับกล้อง IP อยู่แล้ว)
+                source.submit(frame_id, message[FRAME_HEADER_SIZE:])
+            except FrameDecodeError as exc:
+                logger.warning("เฟรม %d ของกล้อง %s ถอดรหัสไม่ได้: %s",
+                               frame_id, source.camera.id, exc)
+                await websocket.send_json({
+                    "type": "error",
+                    "frame_id": frame_id,
+                    "message": str(exc),
+                })
+                continue
+
+            await websocket.send_json({"type": "ack", "frame_id": frame_id})
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket /ws/feed หยุดป้อนภาพกล้อง %s (%s)", source.camera.id, client)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("WebSocket /ws/feed เกิดข้อผิดพลาด: %s", exc)
+        try:
+            await websocket.close(code=1011)
+        except RuntimeError:
+            pass
+    finally:
+        # ต้องลดตัวนับเสมอ ไม่งั้นหน้า health จะรายงานว่ายังมีคนป้อนภาพอยู่ตลอดไป
+        # ทั้งที่ปิดแท็บไปแล้ว ทำให้แยกไม่ออกว่ากล้องหลุดเพราะอะไร
+        source.detach_feeder()
+
+
+# =============================================================================
 # WebSocket: backend push ภาพจากกล้อง IP ไปให้หน้าเว็บ (เฟส 6 + 7)
 # =============================================================================
 #
@@ -549,6 +774,21 @@ async def websocket_stream(websocket: WebSocket) -> None:
 
     เลือกกล้องด้วย query string เช่น /ws/stream?camera=door_in
     ถ้าไม่ระบุจะใช้กล้องตัวแรกที่เปิดใช้งานอยู่
+
+    ============================================================================
+    เฟส 8: หนึ่งช่อง WebSocket ต่อหนึ่งกล้อง
+    ============================================================================
+
+    หน้าเว็บที่แสดงสองจอจะเปิด endpoint นี้สองครั้ง (camera=door_in และ door_out)
+    เลือกแบบนี้แทนการยัดสองกล้องลงช่องเดียว เพราะ:
+
+        - กล้องตัวหนึ่งหลุด ช่องของอีกตัวไม่ต้องรู้เรื่องเลย
+          ไม่มีทางที่ปัญหาของกล้องหนึ่งจะไปหยุดภาพของอีกตัว
+        - คิวของผู้ชม (backpressure) แยกกันตามธรรมชาติ
+          ผู้ชมที่รับกล้องหนึ่งไม่ทัน จะไม่ทำให้ภาพของกล้องอีกตัวกระตุกตาม
+
+    แต่กฎเดิมยังอยู่ครบไม่เปลี่ยน: **ภาพกับผลตรวจของเฟรมนั้นไปด้วยกันในข้อความเดียว**
+    และทุกข้อความระบุ camera ไว้ชัดเจน หน้าเว็บจึงตรวจได้ว่าไม่ได้วาดผิดจอ
     """
     await websocket.accept()
 
@@ -618,6 +858,8 @@ async def websocket_stream(websocket: WebSocket) -> None:
                 await websocket.send_json({
                     "type": "camera_status",
                     "camera": camera_id,
+                    "camera_name": runner.camera.name,
+                    "direction": runner.camera.direction,
                     "alive": False,
                     "status": source.status(),
                 })
@@ -629,6 +871,8 @@ async def websocket_stream(websocket: WebSocket) -> None:
                 await websocket.send_json({
                     "type": "camera_status",
                     "camera": camera_id,
+                    "camera_name": runner.camera.name,
+                    "direction": runner.camera.direction,
                     "alive": True,
                     "status": source.status(),
                 })
