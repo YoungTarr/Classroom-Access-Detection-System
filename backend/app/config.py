@@ -249,36 +249,26 @@ class CameraSettings:
     ออกแบบให้เป็น "รายการ" ตั้งแต่ต้น แม้ตอนนี้จะมีกล้องตัวเดียว
     เพราะระบบจริงจะมีสองตัวที่ประตู (ตัวหนึ่งจับคนเข้า อีกตัวจับคนออก)
     การเพิ่มกล้องตัวที่สองจึงต้องแก้แค่ไฟล์ .env ไม่ต้องแตะโค้ดเลย
+
+    ตั้งแต่เฟส 9 กล้องทุกตัวเป็นกล้อง IP (RTSP) เหมือนกันหมด
+    ไม่มีกล้องที่รับภาพจากเว็บแคมของเบราว์เซอร์อีกแล้ว
+    (โหมดเว็บแคมยังอยู่ แต่เป็นโหมดของทั้งระบบ FRAME_SOURCE=browser
+    ไม่ได้ผูกกับกล้องตัวใดตัวหนึ่ง)
     """
 
     # ชื่อสั้น ๆ ที่ใช้อ้างอิงกล้องตัวนี้ (ใช้เป็นส่วนหนึ่งของชื่อตัวแปร env ด้วย)
+    # เช่น "1" -> ตัวแปร CAMERA_1_HOST, CAMERA_1_PATH, ...
     id: str
 
     # ชื่อที่แสดงบนหน้าเว็บ
     name: str
 
-    # ==========================================================================
-    # ภาพของกล้องตัวนี้มาจากไหน (เฟส 8)
-    # ==========================================================================
-    #
-    #   "rtsp"    = backend ไปดึงจากกล้อง IP เอง (ใช้ host/port/username/password)
-    #   "browser" = เบราว์เซอร์ที่เปิดหน้าเว็บส่งภาพเว็บแคมขึ้นมาให้
-    #
-    # ที่ต้องมี "browser" ด้วย เพราะช่วงนี้มีกล้อง Tapo แค่ตัวเดียว
-    # จึงใช้เว็บแคมของโน้ตบุ๊กเป็นกล้องขาออกไปก่อน เพื่อทดสอบระบบสองกล้องได้จริง
-    #
-    # ข้อดีของการทำเป็น "แหล่งภาพต่อกล้อง" แทนการแยกโหมดทั้งระบบ:
-    # ทุกอย่างที่เหลือมองกล้องสองตัวนี้เหมือนกันหมด (สถิติ, /api/health,
-    # คิวตรวจจับ, การแชร์โมเดล, ทิศทาง IN/OUT)
-    # พอกล้อง Tapo ตัวที่สองมาถึง เปลี่ยน SOURCE เป็น rtsp แล้วใส่ HOST
-    # เท่านี้ก็ใช้งานได้ ไม่ต้องแก้โค้ดแม้แต่บรรทัดเดียว
-    #
-    # ข้อจำกัดที่ต้องรู้: กล้องแบบ browser จะมีภาพเฉพาะตอนมีคนเปิดหน้าเว็บอยู่
-    # ไม่มีใครเปิดอยู่ = ไม่มีภาพ และหน้า health จะรายงานว่ากล้องตัวนั้นหลุด
-    # ซึ่งถูกต้องตามความจริง ไม่ใช่การซ่อนปัญหา
-    source: str
+    # คำนำหน้าชื่อตัวแปร env ของกล้องตัวนี้ เช่น "CAMERA_2_"
+    # เก็บไว้บอกผู้ใช้ให้ตรงตัวว่าต้องไปแก้บรรทัดไหนในไฟล์ .env
+    # (หน้าเว็บเอาไปแสดงตอนกล้องยังไม่ได้ติดตั้ง จะได้ไม่ต้องเดาชื่อตัวแปรเอง)
+    env_prefix: str
 
-    # ---- ใช้เฉพาะกล้องแบบ rtsp (กล้องแบบ browser ไม่ต้องมีค่าพวกนี้) ----
+    # ว่างได้ = ยังไม่ได้ติดตั้งกล้องตัวนี้ (ดู installed ด้านล่าง)
     host: str
     port: int
     username: str
@@ -295,9 +285,18 @@ class CameraSettings:
     enabled: bool
 
     @property
-    def is_rtsp(self) -> bool:
-        """กล้องตัวนี้เป็นกล้อง IP ที่ backend ไปดึงภาพเองหรือไม่"""
-        return self.source == "rtsp"
+    def installed(self) -> bool:
+        """ติดตั้งกล้องตัวนี้แล้วหรือยัง (เฟส 9)
+
+        ตัดสินจาก HOST อย่างเดียว: ว่าง = ยังไม่ได้ติดตั้ง
+
+        ทำไมต้องแยกสถานะนี้ออกจาก "กล้องหลุด":
+        ตอนนี้ยังไม่มีกล้องตัวที่สองอยู่ในมือ ถ้าปล่อยให้ระบบพยายามต่อกล้องที่ไม่มีอยู่จริง
+        จะได้ทั้ง thread ที่วน retry ฟรี ๆ, log ที่เต็มไปด้วยคำว่าต่อไม่ได้
+        และหน้าเว็บที่ขึ้นสีแดงตลอดเวลา ทั้งที่ไม่มีอะไรเสียเลย
+        ผู้ดูแลจะชินกับสีแดงจนไม่สนใจ แล้วพอกล้องที่ติดตั้งไว้จริงหลุด ก็จะไม่มีใครเห็น
+        """
+        return bool(self.host)
 
     @property
     def rtsp_url(self) -> str:
@@ -326,9 +325,9 @@ class CameraSettings:
         ห้าม log RTSP URL เต็ม ๆ เด็ดขาด เพราะ log มักถูกส่งต่อ แปะในแชต
         หรือเก็บไว้ในไฟล์ที่คนอื่นอ่านได้ รหัสผ่านกล้องจะหลุดไปโดยไม่ตั้งใจ
         """
-        if not self.is_rtsp:
-            # กล้องแบบ browser ไม่มี URL ให้ปิดบัง บอกที่มาของภาพไปตรง ๆ แทน
-            return "เว็บแคมของเบราว์เซอร์ (ไม่มี URL)"
+        if not self.installed:
+            # ยังไม่มี HOST เลย ไม่มี URL ให้ปิดบัง บอกเหตุผลไปตรง ๆ แทน
+            return f"ยังไม่ได้ติดตั้งกล้อง (ไม่ได้ตั้ง {self.env_prefix}HOST)"
 
         path = self.path if self.path.startswith("/") else f"/{self.path}"
         return f"rtsp://***:***@{self.host}:{self.port}{path}"
@@ -506,10 +505,10 @@ class StreamSettings:
     #               มีไว้สำหรับพัฒนา/ทดสอบบนเครื่องที่ไม่มีกล้อง IP
     #
     #   "rtsp"    = โหมดกล้องหลายตัวตาม CAMERA_IDS (เฟส 6 เป็นต้นไป)
-    #               ชื่อยังเป็น rtsp ตามเดิมเพราะกล้องส่วนใหญ่เป็นกล้อง IP
-    #               แต่ตั้งแต่เฟส 8 กล้องแต่ละตัวเลือกแหล่งภาพของตัวเองได้
-    #               (CAMERA_<ID>_SOURCE = rtsp หรือ browser)
-    #               จึงใช้กล้อง IP กับเว็บแคมพร้อมกันในโหมดนี้ได้
+    #               กล้องทุกตัวเป็นกล้อง IP ที่ backend ไปดึงภาพเองผ่าน RTSP
+    #
+    # สองโหมดนี้เป็นโหมดของ "ทั้งระบบ" ไม่ผสมกัน
+    # (เฟส 8 เคยให้กล้องบางตัวรับภาพจากเว็บแคมได้ แต่เอาออกไปแล้วในเฟส 9)
     source: str
 
     # ความกว้างที่ย่อภาพก่อนส่งเข้า backend (สูงเกินไป = ช้าและกินแบนด์วิดท์)
@@ -555,14 +554,17 @@ VALID_DIRECTION_REFERENCES = ("world", "screen")
 # ทิศทางที่กล้องแต่ละตัวรับผิดชอบ
 VALID_CAMERA_DIRECTIONS = ("IN", "OUT")
 
-# แหล่งภาพของกล้องแต่ละตัว (เฟส 8 - อ่านคำอธิบายเต็มใน CameraSettings.source)
-VALID_CAMERA_SOURCES = ("rtsp", "browser")
+# รายชื่อกล้องเมื่อไม่ได้ตั้ง CAMERA_IDS ไว้ (เฟส 9)
+# ระบบจริงมีสองตัวที่ประตูเสมอ จึงให้ค่าเริ่มต้นเป็นสองตัวไปเลย
+# ผลคือในไฟล์ .env เขียนแค่ชุด CAMERA_1_* กับ CAMERA_2_* ก็พอ
+DEFAULT_CAMERA_IDS = ["1", "2"]
 
 
 def _camera_env_prefix(camera_id: str) -> str:
     """แปลงชื่อกล้องเป็นคำนำหน้าของตัวแปร environment
 
-    door_in -> CAMERA_DOOR_IN_   จึงได้ตัวแปรเช่น CAMERA_DOOR_IN_HOST
+    1       -> CAMERA_1_         จึงได้ตัวแปรเช่น CAMERA_1_HOST
+    door_in -> CAMERA_DOOR_IN_   (ตั้งชื่อกล้องเป็นคำได้ด้วย ถ้ากำหนด CAMERA_IDS เอง)
     """
     cleaned = "".join(ch if ch.isalnum() else "_" for ch in camera_id.upper())
     return f"CAMERA_{cleaned}_"
@@ -571,27 +573,27 @@ def _camera_env_prefix(camera_id: str) -> str:
 def _load_cameras(require_credentials: bool) -> list[CameraSettings]:
     """อ่านรายการกล้องทั้งหมดจาก environment
 
-    รูปแบบใน .env ออกแบบให้เพิ่มกล้องได้โดยไม่ต้องแก้โค้ด:
+    รูปแบบใน .env ออกแบบให้เพิ่มกล้องได้โดยไม่ต้องแก้โค้ด
+    กล้องทุกตัวใช้ชุดตัวแปรหน้าตาเดียวกันเป๊ะ ต่างกันแค่ตัวเลขข้างหน้า:
 
-        CAMERA_IDS=door_in,door_out
-
-        CAMERA_DOOR_IN_NAME=ประตูทางเข้า
-        CAMERA_DOOR_IN_HOST=192.168.1.102
-        CAMERA_DOOR_IN_DIRECTION=IN
-        ...
+        CAMERA_1_NAME=ประตูทางเข้า         CAMERA_2_NAME=ประตูทางออก
+        CAMERA_1_HOST=192.168.1.158        CAMERA_2_HOST=            <- ว่าง = ยังไม่ได้ติดตั้ง
+        CAMERA_1_USER=...                  CAMERA_2_USER=...
+        CAMERA_1_PASSWORD=...              CAMERA_2_PASSWORD=...
+        CAMERA_1_PORT=554                  CAMERA_2_PORT=554
+        CAMERA_1_PATH=/stream2             CAMERA_2_PATH=/stream2
+        CAMERA_1_DIRECTION=IN              CAMERA_2_DIRECTION=OUT
+        CAMERA_1_ENABLED=true              CAMERA_2_ENABLED=true
 
     ค่าที่กล้องทุกตัวมักใช้เหมือนกัน (บัญชีผู้ใช้ พอร์ต path) ตั้งเป็นค่ากลางได้ที่
     CAMERA_DEFAULT_USER / CAMERA_DEFAULT_PASSWORD / CAMERA_DEFAULT_PORT / CAMERA_DEFAULT_PATH
     แล้วกล้องตัวไหนที่ต่างจากค่ากลางค่อยกำหนดทับเฉพาะตัวนั้น
 
-    กล้องที่ใช้เว็บแคมของเครื่องที่เปิดหน้าเว็บ (เฟส 8) ตั้งแค่:
-
-        CAMERA_DOOR_OUT_SOURCE=browser
-        CAMERA_DOOR_OUT_DIRECTION=OUT
-
-    ไม่ต้องมี HOST หรือบัญชีผู้ใช้ เพราะไม่ได้ต่อผ่านเครือข่าย
+    **HOST ว่าง = ยังไม่ได้ติดตั้งกล้องตัวนี้** (เฟส 9)
+    ไม่ใช่ error ระบบขึ้นได้ปกติ แค่ไม่ไปต่อกล้องตัวนั้นเลย
+    ดูเหตุผลเต็มใน CameraSettings.installed
     """
-    camera_ids = _get_list("CAMERA_IDS")
+    camera_ids = _get_list("CAMERA_IDS", DEFAULT_CAMERA_IDS)
     if not camera_ids:
         return []
 
@@ -617,37 +619,33 @@ def _load_cameras(require_credentials: bool) -> list[CameraSettings]:
 
         enabled = _get_bool(f"{prefix}ENABLED", True)
 
-        # ---- แหล่งภาพของกล้องตัวนี้ (rtsp = กล้อง IP / browser = เว็บแคม) ----
-        source = _get_str(f"{prefix}SOURCE", "rtsp").lower()
-        if source not in VALID_CAMERA_SOURCES:
+        # ---- ตัวแปรที่ถูกยกเลิกไปแล้วในเฟส 9 ----
+        # เดิมตั้ง CAMERA_<ID>_SOURCE=browser ให้กล้องตัวหนึ่งใช้เว็บแคมของโน้ตบุ๊กได้
+        # ตอนนี้กล้องทุกตัวเป็น RTSP แล้ว ถ้ายังเจอค่า browser ค้างอยู่ในไฟล์ .env เก่า
+        # ต้องฟ้องให้ชัด ไม่ใช่เมินเงียบ ๆ แล้วปล่อยให้ผู้ใช้งงว่าทำไมเว็บแคมไม่ขึ้น
+        legacy_source = _get_str(f"{prefix}SOURCE", "").lower()
+        if legacy_source and legacy_source != "rtsp":
             raise ConfigError(
-                f"ค่า {prefix}SOURCE ไม่ถูกต้อง: {source!r} "
-                f"(รองรับเฉพาะ {' หรือ '.join(VALID_CAMERA_SOURCES)})\n"
-                f"  rtsp    = backend ไปดึงภาพจากกล้อง IP เอง\n"
-                f"  browser = เบราว์เซอร์ที่เปิดหน้าเว็บส่งภาพเว็บแคมขึ้นมาให้"
+                f"ค่า {prefix}SOURCE={legacy_source} ถูกยกเลิกไปแล้ว (เฟส 9)\n"
+                f"กล้องทุกตัวเป็นกล้อง IP ผ่าน RTSP แล้ว ให้ลบบรรทัด {prefix}SOURCE ออกจาก .env\n"
+                f"  - ถ้ายังไม่มีกล้องตัวนี้: เว้น {prefix}HOST ว่างไว้ "
+                f"หน้าเว็บจะขึ้นว่า \"ยังไม่ได้ติดตั้งกล้อง\"\n"
+                f"  - ถ้าอยากทดสอบด้วยเว็บแคมของเครื่อง: ใช้ FRAME_SOURCE=browser "
+                f"(เป็นโหมดของทั้งระบบ)"
             )
-
-        is_rtsp = source == "rtsp"
 
         host = _get_str(f"{prefix}HOST", "")
         username = _get_str(f"{prefix}USER", default_user)
         password = _get_str(f"{prefix}PASSWORD", default_password)
 
-        # ค่าที่เกี่ยวกับเครือข่ายบังคับเฉพาะกล้องแบบ rtsp เท่านั้น
-        # กล้องแบบ browser ไม่ได้ต่อผ่านเครือข่าย จึงไม่มีอะไรให้ตั้ง
-        if is_rtsp and not host:
-            raise ConfigError(
-                f"กล้อง {camera_id!r} ไม่ได้กำหนด {prefix}HOST ในไฟล์ .env\n"
-                f"(ชื่อกล้องมาจาก CAMERA_IDS - ถ้าไม่ได้ใช้กล้องตัวนี้แล้วให้เอาออกจาก CAMERA_IDS\n"
-                f" ถ้าตั้งใจจะใช้เว็บแคมของเครื่องแทน ให้ตั้ง {prefix}SOURCE=browser)"
-            )
-
         # บัญชีกล้องขาดไม่ได้ ถ้าไม่มีจะต่อไม่ได้แน่นอน จึงฟ้องตั้งแต่ตอนสตาร์ท
         # ดีกว่าปล่อยให้ไปเจอ error กำกวมจาก FFmpeg ตอน runtime
         #
-        # แต่ตรวจเฉพาะตอนที่จะใช้กล้องจริง (FRAME_SOURCE=rtsp และกล้องเปิดอยู่)
-        # ไม่งั้นคนที่ใช้แค่เว็บแคมจะสตาร์ทระบบไม่ได้ ทั้งที่ยังไม่มีกล้อง IP
-        if require_credentials and enabled and is_rtsp and (not username or not password):
+        # แต่ตรวจเฉพาะกล้องที่จะต่อจริงเท่านั้น
+        # (FRAME_SOURCE=rtsp + เปิดใช้งาน + ติดตั้งแล้วคือมี HOST)
+        # กล้องที่ยังไม่ได้ติดตั้งต้องไม่ทำให้ระบบสตาร์ทไม่ขึ้น
+        # ไม่งั้นก็ต้องไปกรอกบัญชีปลอม ๆ ให้กล้องที่ยังไม่ได้ซื้อ
+        if require_credentials and enabled and host and (not username or not password):
             raise ConfigError(
                 f"กล้อง {camera_id!r} ยังไม่ได้ตั้งบัญชีผู้ใช้\n"
                 f"กำหนด {prefix}USER และ {prefix}PASSWORD "
@@ -667,7 +665,7 @@ def _load_cameras(require_credentials: bool) -> list[CameraSettings]:
             CameraSettings(
                 id=camera_id,
                 name=_get_str(f"{prefix}NAME", camera_id),
-                source=source,
+                env_prefix=prefix,
                 host=host,
                 port=_get_int(f"{prefix}PORT", default_port),
                 username=username,
@@ -710,10 +708,13 @@ def load_settings() -> Settings:
     # ไม่ได้ตั้งเพดานรวมไว้ = คิดให้เองจาก "ต่อกล้อง x จำนวนกล้องที่เปิดใช้"
     # ผลคือระบบกล้องตัวเดียวได้พฤติกรรมเดิมเป๊ะ ส่วนสองกล้องก็ยังได้เต็มที่ทั้งคู่
     # ถ้าเครื่องทำไม่ไหวค่อยลด DETECT_FPS_TOTAL ลงทีหลัง โดยไม่ต้องแตะ DETECT_FPS
+    #
+    # นับเฉพาะกล้องที่ติดตั้งแล้ว (เฟส 9) กล้องที่ยังไม่มีไม่ได้ใช้งบตรวจจับเลย
     detect_fps = _get_int("DETECT_FPS", 5)
     detect_fps_total = _get_int("DETECT_FPS_TOTAL", 0)
     if detect_fps_total <= 0:
-        detect_fps_total = detect_fps * max(1, len(enabled_cameras))
+        installed_count = sum(1 for c in enabled_cameras if c.installed)
+        detect_fps_total = detect_fps * max(1, installed_count)
 
     # การพลิกกระจกเป็นธรรมเนียมของ "โหมดเว็บแคมเดี่ยว" เท่านั้น
     # (ให้ผู้ใช้เห็นตัวเองเหมือนส่องกระจก ซึ่งเป็นธรรมชาติกว่าตอนทดสอบ)
@@ -722,11 +723,7 @@ def load_settings() -> Settings:
     # ในโหมดกล้องหลายตัวจะเกิดปัญหาร้ายแรงคือ backend คำนวณทิศทางแบบพลิกด้าน
     # แต่หน้าเว็บแสดงภาพไม่พลิก ทำให้ป้ายทิศทางสวนทางกับภาพที่เห็น
     # จึงบังคับให้เป็น false เสมอในโหมดกล้องหลายตัว ไม่ว่าจะตั้งค่าอะไรไว้ก็ตาม
-    #
-    # รวมถึงกล้องที่ตั้ง SOURCE=browser ในโหมดนี้ด้วย: ภาพเว็บแคมถูกส่งขึ้นมาแบบไม่พลิก
-    # แล้ว backend ส่งกลับไปแสดงเป็นภาพเดียวกัน จึงไม่มีการพลิกที่จุดไหนเลย
-    # ผลพลอยได้คือ "ซ้ายบนจอ" กับ "ซ้ายที่กล้องเห็น" ตรงกันพอดี
-    # ทิศทาง IN/OUT ในเฟสถัดไปจึงคำนวณจากกล้องทั้งสองแบบได้เหมือนกัน
+    # ผลพลอยได้คือ "ซ้ายบนจอ" กับ "ซ้ายที่กล้องเห็น" ตรงกันพอดีทุกกล้อง
     mirror = _get_bool("CAMERA_MIRROR", True) and frame_source == "browser"
 
     direction_reference = _get_str("DIRECTION_REFERENCE", "screen").lower()

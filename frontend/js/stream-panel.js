@@ -27,6 +27,16 @@
    ต้องหาจากใต้ this.root เท่านั้น เพราะสองจอมีโครงสร้างเหมือนกันเป๊ะ
    ถ้าใช้ id จะชนกันทันที แล้วจอหนึ่งจะไปเขียนตัวเลขทับอีกจอ
    ซึ่งเป็นบั๊ก "ตัวเลขปนกัน" ที่เกณฑ์ข้อ 5 ห้ามไว้
+
+   ============================================================================
+   เฟส 9: ทุกจอเป็นกล้อง IP เหมือนกันหมด
+   ============================================================================
+
+   ไฟล์นี้ไม่แตะเว็บแคมของเครื่องเลย (ไม่มี getUserMedia)
+   ภาพทุกจอมาจาก backend ทาง /ws/stream อย่างเดียว
+
+   กล้องที่ยังไม่ได้ติดตั้ง (HOST ว่าง) ยังมีจอของตัวเองครบทุกอย่าง
+   แต่แสดงกรอบ "ยังไม่ได้ติดตั้งกล้อง" แทนภาพ และไม่เปิด WebSocket เลย
    ============================================================================= */
 
 'use strict';
@@ -38,11 +48,37 @@ const DIRECTION_LABELS = {
   OUT: 'ประตูทางออก (OUT)',
 };
 
-/* คำอธิบายที่มาของภาพ ใช้บอกผู้ใช้ว่าจอนี้เป็นกล้อง IP จริงหรือเว็บแคมชั่วคราว */
-const SOURCE_LABELS = {
-  rtsp: 'กล้อง IP',
-  browser: 'เว็บแคมของเครื่องนี้',
-};
+/**
+ * แปลสถานะกล้องจาก backend เป็นสิ่งที่แสดงบนหน้าเว็บ (เฟส 9)
+ *
+ * ใช้ร่วมกันทั้งจอกล้องและการ์ดสถานะระบบ (app.js) ข้อความจะได้ตรงกันทุกที่
+ *
+ *   state จาก backend    error    ->  แสดงเป็น
+ *   not_installed         -       ->  เทา    "ยังไม่ได้ติดตั้งกล้อง"
+ *   connecting            ไม่มี    ->  เหลือง "กำลังเชื่อมต่อ"
+ *   connecting            มี       ->  แดง   "กล้องหลุด"  (+ สาเหตุ)
+ *   connected             -       ->  เขียว  "ส่งภาพอยู่"
+ *
+ * "กล้องหลุด" คือ connecting ที่มีสาเหตุแนบมา เพราะในมุมของ backend
+ * ทั้งสองกรณีคือกำลังวนพยายามต่อเหมือนกัน ต่างกันแค่เคยล้มเหลวมาแล้วหรือยัง
+ *
+ * @param {object} info  สถานะกล้องจาก /api/cameras หรือ /api/health หรือ camera_status
+ * @returns {{kind: string, dot: string, label: string}}
+ */
+function describeCameraState(info) {
+  const state = info && info.state;
+
+  if (state === 'not_installed') {
+    return { kind: 'not_installed', dot: 'idle', label: 'ยังไม่ได้ติดตั้งกล้อง' };
+  }
+  if (state === 'connected' || (info && info.alive)) {
+    return { kind: 'connected', dot: 'ok', label: 'ส่งภาพอยู่' };
+  }
+  if (info && info.error) {
+    return { kind: 'down', dot: 'error', label: 'กล้องหลุด' };
+  }
+  return { kind: 'connecting', dot: 'pending', label: 'กำลังเชื่อมต่อ' };
+}
 
 /* รายการสถิติของจอหนึ่งจอ - ประกาศไว้ที่เดียวแล้วสร้าง DOM จากรายการนี้
    เพิ่ม/ลด/สลับลำดับได้ที่นี่จุดเดียว ทั้งสองจอจะเหมือนกันเสมอโดยไม่ต้องแก้สองที่ */
@@ -57,7 +93,9 @@ const PANEL_STATS = [
   ['tracks', 'กำลังติดตาม'],
   ['known', 'จดจำได้'],
   ['renderFps', 'อัตราวาดกรอบ'],
-  ['reconnects', 'ต่อใหม่'],
+  // สองตัวเลขนี้วัดคนละเรื่อง: หลุดหลังจากต่อติดแล้ว / พยายามต่อแต่ยังไม่ติด
+  // เดิมมีแค่ตัวแรก กล้องที่ต่อไม่ติดตั้งแต่ต้นจึงขึ้น 0 ตลอดจนดูเหมือนระบบไม่พยายามต่อ
+  ['reconnects', 'หลุด / ลองต่อ'],
 ];
 
 // รอเท่าไรก่อนลองต่อ WebSocket ใหม่เมื่อการเชื่อมต่อหลุดแบบไม่ได้สั่ง
@@ -107,10 +145,15 @@ class StreamPanel {
         return { width: this.streamCanvas.width, height: this.streamCanvas.height };
       },
       getSmoothing: () => this.getConfig().tracking.smoothing,
-      // ไม่มีการพลิกกระจกในโหมดนี้เลย ทั้งกล้อง IP และเว็บแคมที่ป้อนเข้ามา
+      // กล้อง IP ไม่มีการพลิกกระจก
       // (backend บังคับ mirror=false ไว้แล้ว - ดูคำอธิบายใน config.py)
       isMirrored: () => false,
     });
+
+    // กล้องที่ยังไม่ได้ติดตั้ง: ขึ้นกรอบบอกตั้งแต่เปิดหน้าเลย ไม่ต้องรอกดดูภาพ
+    if (!this.isInstalled) {
+      this._showNotInstalled();
+    }
 
     // ขนาดที่แสดงเปลี่ยนได้ตลอด (ย่อ/ขยายหน้าต่าง, สลับ 1 คอลัมน์เป็น 2)
     // ต้องปรับขนาด canvas ที่วาดกรอบตาม ไม่งั้นกรอบจะไม่ตรงกับใบหน้า
@@ -144,12 +187,12 @@ class StreamPanel {
     title.className = 'cam__title';
     title.textContent = DIRECTION_LABELS[cam.direction] || ('ทิศทาง ' + cam.direction);
 
-    // บรรทัดรองบอกชื่อกล้องที่ตั้งใน .env และที่มาของภาพ
-    const subtitle = document.createElement('p');
-    subtitle.className = 'cam__subtitle';
-    subtitle.textContent = cam.name + ' · ' + (SOURCE_LABELS[cam.source] || cam.source);
+    // บรรทัดรองบอกชื่อกล้องที่ตั้งใน .env และที่อยู่ของกล้อง (ปิดบังรหัสผ่านแล้ว)
+    this.subtitle = document.createElement('p');
+    this.subtitle.className = 'cam__subtitle';
+    this._renderSubtitle();
 
-    titleWrap.append(title, subtitle);
+    titleWrap.append(title, this.subtitle);
 
     // จุดสถานะของกล้องตัวนี้ (แยกจากสถานะรวมของระบบ)
     const state = document.createElement('div');
@@ -162,11 +205,6 @@ class StreamPanel {
     state.append(this.stateDot, this.stateText);
 
     head.append(titleWrap, state);
-
-    // ---------- แถบควบคุมเฉพาะจอนี้ (กล้องแบบเว็บแคมใช้เลือกอุปกรณ์) ----------
-    this.controls = document.createElement('div');
-    this.controls.className = 'cam__controls';
-    this.controls.hidden = true;
 
     // ---------- กล่องภาพ ----------
     // โครงเหมือนโหมดเว็บแคมเดี่ยว: canvas ภาพ + canvas กรอบวางทับกันพอดีเป๊ะ
@@ -186,7 +224,12 @@ class StreamPanel {
     idleText.textContent = 'ยังไม่ได้เริ่มดูภาพสด';
     this.idle.appendChild(idleText);
 
-    // กรอบเทาตอนกล้องหลุด พร้อมข้อความบอกสาเหตุ (เกณฑ์ข้อ 10)
+    // กรอบทับภาพตอนไม่มีภาพให้ดู พร้อมข้อความบอกเหตุผล
+    // ใช้กรอบเดียวกันสองแบบ แยกด้วย class (เฟส 9):
+    //   cam__offline                       กล้องหลุด / กำลังเชื่อมต่อ (กรอบเทา ข้อความแดง)
+    //   cam__offline--not-installed        ยังไม่ได้ติดตั้งกล้อง (กรอบเส้นประ โทนกลาง ๆ)
+    // ต้องหน้าตาต่างกันชัดเจน เพราะความหมายต่างกันมาก:
+    // อันแรกคือ "มีปัญหา ต้องไปดู" ส่วนอันหลังคือ "ปกติ แค่ยังไม่มีของ"
     // เป็นของจอนี้เท่านั้น จึงไม่ทำให้ภาพของกล้องอีกตัวหายไปด้วย
     this.offline = document.createElement('div');
     this.offline.className = 'cam__offline';
@@ -233,14 +276,45 @@ class StreamPanel {
     this.alert.className = 'alert alert--error';
     this.alert.hidden = true;
 
-    // ลำดับสำคัญ: กล่องภาพต้องมาต่อจากหัวจอทันที แล้วค่อยเป็นแถบควบคุม
-    //
-    // ถ้าเอาแถบควบคุมไว้เหนือภาพ จอที่มีแถบ (กล้องแบบเว็บแคม) จะถูกดันลงมา
-    // ทำให้ภาพสองจอไม่อยู่ระดับเดียวกัน ซึ่งดูแล้วรู้สึกว่าหน้าเว็บเพี้ยน
-    // พอย้ายมาไว้ใต้ภาพ ภาพของทุกจอจะเริ่มที่ความสูงเดียวกันเสมอ
-    // ไม่ว่าจอไหนจะมีแถบควบคุมหรือไม่
-    root.append(head, this.videoBox, this.controls, stats, this.alert);
+    // ทุกจอมีโครงเดียวกันเป๊ะ (หัว -> ภาพ -> สถิติ -> แจ้งเหตุ)
+    // ภาพของทุกจอจึงเริ่มที่ความสูงเดียวกันเสมอ ไม่มีจอไหนถูกดันลงมา
+    root.append(head, this.videoBox, stats, this.alert);
     this.root = root;
+  }
+
+  /** กล้องตัวนี้ติดตั้งแล้วหรือยัง (เฟส 9) - ค่า installed มาจาก backend */
+  get isInstalled() {
+    return this.camera.installed !== false;
+  }
+
+  _renderSubtitle() {
+    const cam = this.camera;
+    this.subtitle.textContent = this.isInstalled
+      ? cam.name + ' · กล้อง IP · ' + (cam.url || '')
+      : cam.name + ' · ยังไม่ได้ติดตั้งกล้อง';
+  }
+
+  /**
+   * แสดงกรอบ "ยังไม่ได้ติดตั้งกล้อง" (เฟส 9)
+   *
+   * บอกผู้ใช้ให้ครบว่าต้องทำอะไรต่อ โดยใช้ชื่อตัวแปรจริงที่ backend ส่งมา (host_env)
+   * ไม่เดาเองในฝั่งนี้ เพราะชื่อกล้องใน .env เปลี่ยนได้
+   */
+  _showNotInstalled() {
+    const hostEnv = this.camera.host_env || 'CAMERA_<ชื่อ>_HOST';
+
+    this.alive = false;
+    this.idle.hidden = true;
+    this.offline.classList.add('cam__offline--not-installed');
+    this.offlineTitle.textContent = 'ยังไม่ได้ติดตั้งกล้อง';
+    this.offlineReason.textContent = 'ยังไม่ได้ตั้งค่า ' + hostEnv + ' ในไฟล์ .env';
+    this.offlineHint.textContent =
+      'ติดตั้งกล้องแล้วใส่ IP ของกล้องใน ' + hostEnv +
+      ' จากนั้นสั่ง docker compose up -d backend — ไม่ต้องแก้โค้ด';
+    this.offline.hidden = false;
+
+    this._setState('idle', 'ยังไม่ได้ติดตั้ง');
+    this._resetStats();
   }
 
   /** เอาจอนี้ไปแปะในหน้าเว็บ */
@@ -254,6 +328,14 @@ class StreamPanel {
   start() {
     if (this.running) return;
     this.running = true;
+
+    // กล้องที่ยังไม่ได้ติดตั้ง: ไม่เปิด WebSocket เลย (เฟส 9)
+    // ไม่มีภาพให้รับอยู่แล้ว ถ้าเปิดไว้ก็แค่ถือการเชื่อมต่อค้างไว้เปล่า ๆ
+    if (!this.isInstalled) {
+      this._showNotInstalled();
+      return;
+    }
+
     this.frameTimestamps = [];
     this.ctx = this.streamCanvas.getContext('2d', { alpha: false });
     this.reconnectDelay = WS_RECONNECT_MIN_MS;
@@ -279,12 +361,19 @@ class StreamPanel {
 
     this.overlay.stop();
     this.alive = false;
+    this.showAlert(null);
+
+    // กล้องที่ยังไม่ได้ติดตั้งต้องยังบอกสถานะนั้นอยู่ แม้หยุดดูภาพแล้ว
+    // ถ้าเปลี่ยนเป็น "ปิดอยู่" ผู้ใช้จะเข้าใจผิดว่ากล้องตัวนี้มีอยู่แต่ถูกปิด
+    if (!this.isInstalled) {
+      this._showNotInstalled();
+      return;
+    }
 
     this.idle.hidden = false;
     this.offline.hidden = true;
     this._setState('pending', 'ปิดอยู่');
     this._resetStats();
-    this.showAlert(null);
   }
 
   /** เก็บกวาดให้หมดก่อนทิ้งจอนี้ (ใช้ตอนรายชื่อกล้องเปลี่ยน) */
@@ -315,6 +404,11 @@ class StreamPanel {
       // (ถ้ากล้องยังหลุดจริง กรอบเทาในกล่องภาพจะบอกอยู่แล้ว เป็นคนละเรื่องกัน)
       this.showAlert(null);
       this._setState('pending', 'รอภาพเฟรมแรก…');
+
+      // ต้องรีเซ็ตด้วย ไม่งั้นหลัง backend รีสตาร์ทแล้วต่อกลับมาได้
+      // ค่ายังเป็น true จากรอบก่อน เฟรมแรกที่เข้ามาจึงไม่เปลี่ยนป้ายกลับเป็น "รับภาพสดอยู่"
+      // แล้วป้ายจะค้างที่ "รอภาพเฟรมแรก…" ทั้งที่ภาพวิ่งอยู่
+      this.alive = false;
     });
 
     socket.addEventListener('message', (event) => {
@@ -350,6 +444,10 @@ class StreamPanel {
 
       if (!this.running) return;
 
+      // backend บอกมาแล้วว่ากล้องตัวนี้ยังไม่ได้ติดตั้ง แล้วปิดช่องไปเอง
+      // ไม่ใช่การหลุด จึงห้ามวนต่อใหม่ (ไม่งั้นจะต่อ-ปิด-ต่อ ไปเรื่อย ๆ ไม่มีวันจบ)
+      if (!this.isInstalled) return;
+
       // การเชื่อมต่อหลุดแบบไม่ได้สั่ง เช่น backend รีสตาร์ท หรือ nginx ตัด
       // ต้องต่อใหม่ให้เองเรื่อย ๆ ผู้ใช้ไม่ควรต้องกดรีเฟรชหน้าเว็บ
       this._setState('error', 'การเชื่อมต่อหลุด');
@@ -374,10 +472,19 @@ class StreamPanel {
   _handleCameraStatus(data) {
     const status = data.status || {};
 
-    // อัปเดตตัวนับต่อใหม่ให้เห็นทันทีแม้ยังไม่มีภาพ
-    if (status.reconnects !== undefined) {
-      this.stat.reconnects.textContent = status.reconnects + ' ครั้ง';
+    // ---- ยังไม่ได้ติดตั้งกล้อง (เฟส 9) ----
+    // เกิดได้ถ้าหน้าเว็บยังถือข้อมูลเก่าอยู่ (เช่น backend เพิ่งถูกตั้งค่าใหม่)
+    // จำไว้ว่ากล้องนี้ยังไม่มี แล้วตัว close handler จะไม่วนต่อใหม่
+    if (status.state === 'not_installed') {
+      this.camera = Object.assign({}, this.camera, status);
+      this._renderSubtitle();
+      this._showNotInstalled();
+      this.onUpdate();
+      return;
     }
+
+    // อัปเดตตัวนับให้เห็นทันทีแม้ยังไม่มีภาพ
+    this._renderRetryCounters(status);
 
     if (data.alive) {
       this.alive = true;
@@ -387,24 +494,31 @@ class StreamPanel {
       return;
     }
 
-    // ---- กล้องตัวนี้หลุด ----
+    // ---- กล้องตัวนี้ยังไม่ส่งภาพ: กำลังเชื่อมต่อ หรือ หลุด ----
     // แสดงกรอบเทาทับ "จอนี้เท่านั้น" พร้อมบอกสาเหตุ
     // จอของกล้องอีกตัวไม่ถูกแตะต้องเลย เพราะทุก element อยู่ใต้ this.root
     this.alive = false;
-    this._setState('error', 'ไม่ส่งภาพ');
 
     // ล้างกรอบทิ้ง เพราะตำแหน่งที่ค้างอยู่ไม่ตรงกับความจริงแล้ว
     // ถ้าปล่อยไว้จะเห็นกรอบลอยนิ่งทับภาพค้าง ซึ่งทำให้เข้าใจผิดว่ายังตรวจได้อยู่
     this.overlay.setTracks([]);
 
-    const isWebcam = this.camera.source === 'browser';
+    const view = describeCameraState(status);
+    this._setState(view.dot, view.label);
 
-    this.offlineTitle.textContent = 'กล้องนี้ไม่ส่งภาพ';
-    this.offlineReason.textContent = status.error || 'ไม่ทราบสาเหตุ';
-    this.offlineHint.textContent = isWebcam
-      ? 'กล้องนี้ใช้เว็บแคมของเครื่องที่เปิดหน้าเว็บ — ต้องกดอนุญาตใช้กล้องและเปิดหน้านี้ค้างไว้'
-      : 'ต่อใหม่ไปแล้ว ' + (status.reconnects || 0) + ' ครั้ง — ' +
-        'ระบบจะพยายามต่อใหม่ให้เองเรื่อย ๆ เสียบปลั๊กกลับแล้วภาพจะกลับมาเอง';
+    this.offline.classList.remove('cam__offline--not-installed');
+    if (view.kind === 'down') {
+      this.offlineTitle.textContent = 'กล้องหลุด';
+      this.offlineReason.textContent = status.error;
+    } else {
+      // ยังไม่เคยล้มเหลว = เพิ่งเริ่มต่อ (เช่นเพิ่งสตาร์ท backend) ไม่ใช่ปัญหา
+      this.offlineTitle.textContent = 'กำลังเชื่อมต่อกล้อง…';
+      this.offlineReason.textContent = '';
+    }
+    this.offlineHint.textContent =
+      'หลุดหลังต่อติด ' + (status.reconnects || 0) + ' ครั้ง · ' +
+      'พยายามต่อแล้ว ' + (status.connect_attempts || 0) + ' ครั้ง — ' +
+      'ระบบจะพยายามต่อใหม่ให้เองเรื่อย ๆ เสียบปลั๊กกลับแล้วภาพจะกลับมาเอง';
     this.offline.hidden = false;
 
     // ตัวเลขที่ไม่มีความหมายแล้วต้องล้าง ไม่ใช่ปล่อยค้างค่าเดิมไว้ให้เข้าใจผิด
@@ -466,8 +580,8 @@ class StreamPanel {
       this.streamCanvas.height = bitmap.height;
 
       // ตั้งสัดส่วนกล่องตามขนาดจริงที่กล้องตัวนี้ส่งมา ไม่ได้ hardcode ไว้
-      // สำคัญมากในเฟสนี้เพราะสองกล้องมีสัดส่วนไม่เท่ากันได้
-      // (Tapo /stream2 เป็น 640x360 ส่วนเว็บแคมมักเป็น 4:3)
+      // สำคัญเพราะสองกล้องให้ความละเอียดไม่เท่ากันได้
+      // (เช่นทดสอบด้วยกล้องตัวเดียว: /stream1 เป็น 1080p ส่วน /stream2 ต่ำกว่า)
       this.videoBox.style.aspectRatio = bitmap.width + ' / ' + bitmap.height;
       this.overlay.syncSize();
       this.stat.resolution.textContent = bitmap.width + ' × ' + bitmap.height;
@@ -540,22 +654,47 @@ class StreamPanel {
   // สถานะจากการสำรวจเป็นระยะ (/api/cameras) - ใช้ตอนยังไม่ได้กดดูภาพ
   // ==========================================================================
   applyCameraInfo(info) {
+    const wasInstalled = this.isInstalled;
     this.camera = Object.assign({}, this.camera, info);
+    this._renderSubtitle();
 
-    if (info.reconnects !== undefined) {
-      this.stat.reconnects.textContent = info.reconnects + ' ครั้ง';
+    // ยังไม่ได้ติดตั้ง: แสดงสถานะนี้เสมอ ไม่ว่าจะกดดูภาพอยู่หรือไม่
+    if (!this.isInstalled) {
+      this._showNotInstalled();
+      return;
     }
+
+    // เพิ่งติดตั้งกล้อง (ใส่ HOST แล้วรีสตาร์ท backend) ระหว่างที่หน้านี้เปิดค้างอยู่
+    // ตอนกดดูภาพจอนี้ไม่ได้เปิด WebSocket ไว้ (เพราะตอนนั้นยังไม่มีกล้อง)
+    // จึงต้องเริ่มให้ใหม่เอง ไม่งั้นผู้ใช้ต้องรีเฟรชหน้าเว็บทั้งที่ระบบพร้อมแล้ว
+    if (!wasInstalled) {
+      this.offline.classList.remove('cam__offline--not-installed');
+      this.offline.hidden = true;
+      this.idle.hidden = false;
+      if (this.running) {
+        this.running = false;
+        this.start();
+      }
+    }
+
+    this._renderRetryCounters(info);
 
     // ระหว่างที่ยังไม่ได้ดูภาพ ก็ควรเห็นว่ากล้องตัวไหนพร้อมหรือหลุดอยู่
     if (!this.running) {
-      if (info.alive) {
+      const view = describeCameraState(info);
+      if (view.kind === 'connected') {
         this._setState('ok', 'พร้อม (ยังไม่ได้ดู)');
-      } else if (info.connected) {
-        this._setState('pending', 'ต่อได้แต่ยังไม่มีภาพ');
       } else {
-        this._setState('error', 'ยังต่อไม่ได้');
+        this._setState(view.dot, view.label);
       }
     }
+  }
+
+  /** ตัวเลข "หลุด / ลองต่อ" ของจอนี้ */
+  _renderRetryCounters(info) {
+    if (info.reconnects === undefined && info.connect_attempts === undefined) return;
+    this.stat.reconnects.textContent =
+      (info.reconnects || 0) + ' / ' + (info.connect_attempts || 0) + ' ครั้ง';
   }
 
   // ==========================================================================

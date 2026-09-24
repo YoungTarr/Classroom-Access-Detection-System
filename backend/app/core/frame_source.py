@@ -3,10 +3,13 @@
 จุดประสงค์ของไฟล์นี้คือ **ซ่อนที่มาของภาพ** ไม่ให้ส่วนประมวลผลรู้ว่าเฟรมมาจากไหน
 ส่วนที่ทำ detect/identify/track จะเห็นแค่ "เฟรมล่าสุด" เหมือนกันหมด
 
-    เฟส 2: BrowserFrameSource  - เบราว์เซอร์ส่งภาพ JPEG เข้ามาทาง WebSocket
-    เฟส 6: RTSPFrameSource     - อ่านจากกล้อง IP ด้วย thread ของตัวเอง
+    เฟส 2: BrowserFrameSource      - เบราว์เซอร์ส่งภาพ JPEG เข้ามาทาง WebSocket
+                                     (ใช้เฉพาะโหมดเว็บแคมเดี่ยว FRAME_SOURCE=browser)
+    เฟส 6: RTSPFrameSource         - อ่านจากกล้อง IP ด้วย thread ของตัวเอง
+    เฟส 9: NotInstalledFrameSource - ตัวแทนของกล้องที่ยังไม่ได้ติดตั้ง (HOST ว่าง)
+                                     ไม่ทำอะไรเลย มีไว้ให้หน้าเว็บรู้ว่ากล้องตัวนี้มีอยู่
 
-ทั้งสองแบบมีพฤติกรรมร่วมกันข้อหนึ่งที่สำคัญมาก:
+แหล่งที่ส่งภาพได้จริงทั้งสองแบบมีพฤติกรรมร่วมกันข้อหนึ่งที่สำคัญมาก:
 **เก็บแค่เฟรมล่าสุดเฟรมเดียว เฟรมเก่าทิ้งทันที**
 ถ้าเก็บเป็นคิว เมื่อประมวลผลตามไม่ทัน ภาพที่เห็นจะช้ากว่าความจริงเรื่อย ๆ
 (latency ถ่างขึ้นไม่มีที่สิ้นสุด) ซึ่งเป็นอาการที่ยอมรับไม่ได้สำหรับระบบตรวจจับ
@@ -83,39 +86,27 @@ class FrameSource(ABC):
 
 
 class BrowserFrameSource(FrameSource):
-    """รับภาพที่เบราว์เซอร์ส่งเข้ามาทาง WebSocket
+    """รับภาพที่เบราว์เซอร์ส่งเข้ามาทาง WebSocket (โหมดเว็บแคมเดี่ยว)
+
+    ใช้เฉพาะตอน FRAME_SOURCE=browser เท่านั้น ซึ่งเป็นโหมดของ "ทั้งระบบ"
+    มีไว้พัฒนา/ทดสอบบนเครื่องที่ไม่มีกล้อง IP เลย
+    ภาพมาทาง /ws/detect แล้วผลตรวจจับถูกส่งกลับไปให้เบราว์เซอร์วาดกรอบเอง
+
+    หมายเหตุเฟส 9: เฟส 8 เคยใช้คลาสนี้เป็น "กล้องตัวหนึ่ง" ในระบบกล้องหลายตัวด้วย
+    (เอาเว็บแคมของโน้ตบุ๊กมาแทนกล้องขาออกที่ยังไม่มี) ตอนนี้เอาออกไปแล้ว
+    กล้องในระบบกล้องหลายตัวเป็น RTSP ทุกตัว ส่วนกล้องที่ยังไม่ได้ซื้อ
+    ใช้ NotInstalledFrameSource แทน
 
     ต่างจาก RTSP ตรงที่แหล่งนี้เป็นแบบ "ถูกป้อน" (push) ไม่ใช่ "ไปดึง" (pull)
     ตัว WebSocket handler จะเรียก submit() ทุกครั้งที่ได้รับเฟรมใหม่
-
-    ============================================================================
-    ใช้สองแบบ (เฟส 8)
-    ============================================================================
-
-    1. โหมดเว็บแคมเดี่ยว (FRAME_SOURCE=browser, เฟส 2-5)
-       สร้างโดยไม่ส่ง camera เข้ามา ใช้กับ /ws/detect ที่ตอบผลกลับไปให้เบราว์เซอร์
-       วาดกรอบเอง ไม่มีเรื่องกล้องหลายตัวเข้ามาเกี่ยวเลย
-
-    2. เป็น "กล้องตัวหนึ่ง" ในระบบกล้องหลายตัว (CAMERA_<ID>_SOURCE=browser)
-       สร้างโดยส่ง camera เข้ามา แล้วทุกอย่างที่เหลือมองมันเหมือนกล้อง IP ทุกประการ
-       (มี CameraRunner, เข้าคิวตรวจจับร่วมกัน, มีสถิติของตัวเอง, มีทิศทาง IN/OUT)
-       ใช้ตอนที่ยังมีกล้อง Tapo ไม่ครบ แล้วเอาเว็บแคมของโน้ตบุ๊กมาแทนไปก่อน
-
-    ============================================================================
-    "ยังมีชีวิตอยู่" ของแหล่งแบบนี้หมายความว่าอะไร
-    ============================================================================
-
-    กล้อง IP ตายเมื่อ "เครือข่ายขาด" ส่วนแหล่งนี้ตายเมื่อ "ไม่มีใครส่งภาพมาแล้ว"
-    ซึ่งเกิดได้ทั้งตอนปิดแท็บ ปิดกล้อง หรือเบราว์เซอร์หยุดส่งไปเฉย ๆ
-
-    จึงวัดด้วยเกณฑ์เดียวกับ RTSP เป๊ะ คือ "เพิ่งได้เฟรมใหม่ภายในเวลาที่กำหนดไหม"
-    ไม่ใช่ดูแค่ว่า WebSocket ยังต่ออยู่หรือเปล่า เพราะการเชื่อมต่อที่ยังเปิดค้าง
-    แต่ไม่มีข้อมูลไหลเลย เป็นสถานะที่หน้าเว็บต้องเห็นว่า "หลุด" เหมือนกัน
     """
 
-    def __init__(self, camera=None) -> None:  # camera: CameraSettings | None
-        self.camera = camera
-        self.name = f"browser:{camera.id}" if camera is not None else "browser"
+    # ไม่ได้ผูกกับกล้องตัวใดในระบบกล้องหลายตัว
+    # main.py ใช้ค่านี้แยกว่าแหล่งภาพไหนต้องมี CameraRunner
+    camera = None
+
+    def __init__(self) -> None:
+        self.name = "browser"
 
         # ล็อกเพราะ submit() ถูกเรียกจาก thread ของ WebSocket
         # ส่วน read() อาจถูกเรียกจาก thread ประมวลผล (ตั้งแต่เฟส 3 เป็นต้นไป)
@@ -125,30 +116,6 @@ class BrowserFrameSource(FrameSource):
 
         # นับจำนวนเฟรมที่รับมาทั้งหมด ใช้ดูสถานะในหน้า health
         self._received_count = 0
-
-        # ---- สถานะแบบเดียวกับกล้อง IP เพื่อให้หน้าเว็บแสดงผลด้วยโค้ดชุดเดียวกัน ----
-        self._last_frame_at: float = 0.0
-        self._frame_size: tuple[int, int] | None = None
-        self._read_meter = RateMeter()
-
-        # จำนวนเบราว์เซอร์ที่กำลังป้อนภาพให้กล้องตัวนี้อยู่
-        # ใช้แยกสองกรณีที่ต่างกันมากให้ผู้ใช้เห็น:
-        #     ไม่มีใครต่อเข้ามาเลย  -> "ยังไม่มีเบราว์เซอร์ส่งภาพ" (ปกติ ไม่ใช่ความผิดพลาด)
-        #     ต่ออยู่แต่ภาพไม่มา    -> "ส่งภาพไม่ทัน / กล้องของเครื่องมีปัญหา"
-        self._feeders = 0
-
-        # นับจำนวนครั้งที่มีเบราว์เซอร์มาเริ่มป้อนภาพใหม่
-        # เทียบเท่ากับตัวนับ reconnect ของกล้อง IP
-        self._session_count = 0
-
-        # ตั้งข้อความตั้งต้นไว้เลย ไม่ปล่อยเป็น None
-        # เพราะถ้าว่างไว้ หน้าเว็บจะขึ้นว่า "ไม่ทราบสาเหตุ" ตั้งแต่เปิดหน้ามา
-        # ทั้งที่จริงเรารู้สาเหตุแน่ชัดว่ายังไม่มีใครเริ่มส่งภาพ
-        self._last_error: str | None = (
-            "ยังไม่มีเบราว์เซอร์ส่งภาพเว็บแคมเข้ามา "
-            "(กดปุ่มเริ่มดูภาพสดแล้วอนุญาตให้ใช้กล้องของเครื่อง)"
-            if camera is not None else None
-        )
 
     # ------------------------------------------------------------------
     # วงจรชีวิต
@@ -162,48 +129,12 @@ class BrowserFrameSource(FrameSource):
             self._latest = None
 
     def is_alive(self) -> bool:
-        """ยังมีภาพใหม่ไหลเข้ามาอยู่จริงหรือไม่
+        """แหล่งภาพถูกเปิดใช้งานอยู่หรือไม่
 
-        กล้องแบบ browser ที่เป็นส่วนหนึ่งของระบบกล้องหลายตัว ใช้เกณฑ์เดียวกับ RTSP
-        คือดูว่า "เพิ่งได้เฟรมใหม่มาหรือเปล่า" ไม่ใช่ดูว่า WebSocket ยังต่ออยู่ไหม
-
-        ส่วนโหมดเว็บแคมเดี่ยว (ไม่มี camera) ยังใช้ความหมายเดิมคือ
-        "แหล่งภาพถูกเปิดใช้งานอยู่" เพราะจังหวะการส่งเป็นของเบราว์เซอร์ล้วน ๆ
-        และหน้า health ในโหมดนั้นไม่ได้ใช้ค่านี้ตัดสินว่ากล้องหลุด
+        จังหวะการส่งภาพเป็นของเบราว์เซอร์ล้วน ๆ และหน้า health ในโหมดนี้
+        ไม่ได้ใช้ค่านี้ตัดสินว่ากล้องหลุด จึงดูแค่ว่าเริ่มทำงานแล้วหรือยัง
         """
-        if not self._started:
-            return False
-        if self.camera is None:
-            return True
-        if not self._last_frame_at:
-            return False
-        return (time.monotonic() - self._last_frame_at) <= settings.rtsp.watchdog_timeout
-
-    # ------------------------------------------------------------------
-    # การเชื่อมต่อของเบราว์เซอร์ที่ป้อนภาพ
-    # ------------------------------------------------------------------
-    def attach_feeder(self) -> None:
-        """เบราว์เซอร์เริ่มป้อนภาพให้กล้องตัวนี้"""
-        with self._lock:
-            self._feeders += 1
-            self._session_count += 1
-            self._last_error = None
-
-    def detach_feeder(self) -> None:
-        """เบราว์เซอร์เลิกป้อนภาพ (ปิดแท็บ / กดหยุด / การเชื่อมต่อหลุด)"""
-        with self._lock:
-            self._feeders = max(0, self._feeders - 1)
-            if self._feeders == 0:
-                self._last_error = (
-                    "ไม่มีเบราว์เซอร์ส่งภาพเว็บแคมเข้ามาแล้ว "
-                    "(กล้องแบบ browser จะมีภาพเฉพาะตอนเปิดหน้าเว็บค้างไว้)"
-                )
-                self._read_meter.reset()
-
-    @property
-    def feeder_count(self) -> int:
-        with self._lock:
-            return self._feeders
+        return self._started
 
     # ------------------------------------------------------------------
     # รับภาพเข้า
@@ -226,21 +157,17 @@ class BrowserFrameSource(FrameSource):
                 "อาจไม่ใช่ไฟล์ JPEG หรือส่งมาไม่ครบ"
             )
 
-        now = time.monotonic()
         frame = Frame(
             frame_id=frame_id,
             image=image,
-            received_at=now,
+            received_at=time.monotonic(),
         )
 
         with self._lock:
             # ทับเฟรมเดิมทันที ไม่สะสมเป็นคิว
             self._latest = frame
             self._received_count += 1
-            self._frame_size = (image.shape[1], image.shape[0])
-            self._last_frame_at = now
 
-        self._read_meter.tick()
         return frame
 
     # ------------------------------------------------------------------
@@ -256,46 +183,92 @@ class BrowserFrameSource(FrameSource):
         with self._lock:
             return self._received_count
 
-    # ------------------------------------------------------------------
-    # สถานะ
-    # ------------------------------------------------------------------
+
+# =============================================================================
+# สถานะของกล้องหนึ่งตัว (เฟส 9)
+# =============================================================================
+#
+# หน้าเว็บและ /api/health ใช้ค่าเหล่านี้ตัดสินว่าจะแสดงอะไร
+#
+#   not_installed  ยังไม่ได้ติดตั้งกล้อง (ไม่ได้ตั้ง HOST) -> สีเทา ไม่ใช่ความผิดพลาด
+#   connecting     ตั้ง HOST แล้วแต่ยังไม่ได้ภาพ -> ถ้ามี error ด้วย = "กล้องหลุด"
+#   connected      ได้ภาพใหม่อยู่จริง
+#
+# "กล้องหลุด" ไม่ได้แยกเป็นสถานะที่สี่ เพราะในมุมของระบบมันคือ "กำลังพยายามต่อ"
+# เหมือนกันทุกอย่าง (thread ยังวน retry อยู่) ต่างกันแค่มีสาเหตุให้บอกผู้ใช้
+# หน้าเว็บจึงดูจาก state + error คู่กัน
+CAMERA_STATE_NOT_INSTALLED = "not_installed"
+CAMERA_STATE_CONNECTING = "connecting"
+CAMERA_STATE_CONNECTED = "connected"
+
+
+class NotInstalledFrameSource(FrameSource):
+    """ตัวแทนของกล้องที่ยังไม่ได้ติดตั้ง (HOST ว่าง) - เฟส 9
+
+    ============================================================================
+    ทำไมต้องมีคลาสนี้ แทนที่จะไม่สร้างอะไรเลย
+    ============================================================================
+
+    ถ้าไม่สร้างอะไรเลย กล้องตัวนี้จะหายไปจาก /api/health และหน้าเว็บ
+    แล้วผู้ใช้จะแยกไม่ออกระหว่าง "ยังไม่ได้ติดตั้ง" กับ "ลืมตั้งค่า / ระบบพัง"
+    คลาสนี้ทำให้กล้องตัวนั้นยังมีตัวตนอยู่ในทุกที่ พร้อมบอกสถานะ not_installed ชัด ๆ
+
+    ============================================================================
+    สิ่งที่คลาสนี้ "ไม่ทำ" โดยตั้งใจ
+    ============================================================================
+
+        - ไม่สร้าง thread     -> ไม่กิน CPU แม้แต่นิดเดียว
+        - ไม่พยายามต่อ        -> ไม่มี retry ไม่มี backoff ไม่มี FFmpeg
+        - ไม่เขียน log ซ้ำ ๆ   -> main.py เขียนบรรทัดเดียวตอนสตาร์ทเท่านั้น
+        - ไม่มี CameraRunner  -> main.py ข้ามกล้องตัวนี้ ไม่มีลูปตรวจจับ/ลูปส่งภาพ
+
+    ติดตั้งกล้องแล้ว: ใส่ HOST ใน .env แล้วรีสตาร์ท backend
+    ระบบจะสร้าง RTSPFrameSource ให้แทนคลาสนี้เอง ไม่ต้องแก้โค้ด
+    """
+
+    def __init__(self, camera) -> None:  # camera: CameraSettings
+        self.camera = camera
+        self.name = f"not_installed:{camera.id}"
+
+    def start(self) -> None:
+        # ตั้งใจให้ว่าง - ไม่มีอะไรต้องเริ่ม
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def read(self) -> Frame | None:
+        return None
+
+    def is_alive(self) -> bool:
+        return False
+
     def status(self) -> dict:
-        """ข้อมูลสำหรับ /api/health และหน้าเว็บ
+        """รูปแบบเหมือน RTSPFrameSource.status() ทุกกุญแจ
 
-        **รูปแบบต้องเหมือน RTSPFrameSource.status() ทุกกุญแจ**
-        เพราะหน้าเว็บใช้โค้ดชุดเดียวกันแสดงผลกล้องทุกตัว ไม่แยกว่าเป็นชนิดไหน
-        ถ้ารูปแบบต่างกัน จะต้องเขียน if แยกชนิดกล้องกระจายไปทั่วฝั่งหน้าเว็บ
-        ซึ่งเป็นต้นทางของบั๊ก "กล้องตัวหนึ่งแสดงผลไม่เหมือนอีกตัว"
+        หน้าเว็บใช้โค้ดชุดเดียวแสดงผลกล้องทุกตัว ถ้ากุญแจไม่ครบ
+        จะต้องเขียน if แยกกรณีกระจายไปทั่ว ซึ่งเป็นต้นทางของบั๊ก
         """
-        with self._lock:
-            frame_size = self._frame_size
-            feeders = self._feeders
-            error = self._last_error
-            received = self._received_count
-
-        age = (
-            time.monotonic() - self._last_frame_at
-            if self._last_frame_at else None
-        )
-
         camera = self.camera
         return {
-            "id": camera.id if camera else "browser",
-            "name": camera.name if camera else "เว็บแคมของเบราว์เซอร์",
-            "direction": camera.direction if camera else None,
-            "source": "browser",
-            "url": camera.safe_url() if camera else "เว็บแคมของเบราว์เซอร์ (ไม่มี URL)",
-            # "เชื่อมต่อแล้ว" ของกล้องแบบนี้ = มีเบราว์เซอร์กำลังป้อนภาพอยู่
-            "connected": feeders > 0,
-            "alive": self.is_alive(),
-            "received_frames": received,
-            # เทียบเท่าตัวนับ reconnect ของกล้อง IP คือจำนวนครั้งที่เริ่มป้อนภาพใหม่
-            "reconnects": self._session_count,
-            "feeders": feeders,
-            "read_fps": round(self._read_meter.fps, 1),
-            "resolution": list(frame_size) if frame_size else None,
-            "last_frame_age_s": round(age, 1) if age is not None else None,
-            "error": error,
+            "id": camera.id,
+            "name": camera.name,
+            "direction": camera.direction,
+            "url": camera.safe_url(),
+            "state": CAMERA_STATE_NOT_INSTALLED,
+            "installed": False,
+            # ชื่อตัวแปรที่ต้องไปตั้ง หน้าเว็บเอาไปบอกผู้ใช้ตรง ๆ ไม่ต้องเดา
+            "host_env": f"{camera.env_prefix}HOST",
+            "connected": False,
+            "alive": False,
+            "received_frames": 0,
+            "reconnects": 0,
+            "connect_attempts": 0,
+            "read_fps": 0.0,
+            "resolution": None,
+            "last_frame_age_s": None,
+            # ไม่ใช่ error - ไม่มีอะไรเสีย แค่ยังไม่มีกล้อง
+            "error": None,
         }
 
 
@@ -353,8 +326,15 @@ class RTSPFrameSource(FrameSource):
         self._connected = False
         self._last_frame_at: float = 0.0
         self._last_error: str | None = None
-        self._reconnect_count = 0
         self._received_count = 0
+
+        # ตัวนับสองตัวนี้วัดคนละเรื่องกัน ต้องแยกกันไว้:
+        #   reconnects        ต่อติดแล้ว "หลุดทีหลัง" กี่ครั้ง (สตรีมไม่เสถียร)
+        #   connect_attempts  พยายามเปิดสตรีม "ไม่สำเร็จ" ไปกี่ครั้ง (ยังต่อไม่ติดเลย)
+        # เดิมมีแค่ตัวแรก กล้องที่ต่อไม่ติดตั้งแต่ต้นเลยขึ้นว่า "ต่อใหม่ 0 ครั้ง" ตลอด
+        # ทั้งที่ระบบวนลองอยู่จริง ทำให้เข้าใจผิดว่าระบบไม่ได้พยายามต่อใหม่
+        self._reconnect_count = 0
+        self._connect_attempts = 0
 
         # ความละเอียดที่กล้องตัวนี้ส่งมาจริง - ห้ามเดา เพราะกล้องคนละรุ่น
         # หรือคนละ path (/stream1 กับ /stream2) ให้ขนาดไม่เท่ากัน
@@ -423,9 +403,11 @@ class RTSPFrameSource(FrameSource):
             if capture is None:
                 # ต่อไม่ติด - รอแล้วลองใหม่ โดยเพิ่มเวลารอเป็นเท่าตัว
                 # (1, 2, 4, 8, ... จนถึงเพดาน) เพื่อไม่ให้ยิงถี่ ๆ ใส่กล้องที่ยังไม่พร้อม
+                # ผลพลอยได้คือ log ก็ถี่ตามไปด้วยไม่เกินครั้งละเพดาน (ค่าเริ่มต้น 30 วินาที)
+                self._connect_attempts += 1
                 logger.warning(
-                    "กล้อง %s ต่อไม่ได้ จะลองใหม่ในอีก %.0f วินาที (%s)",
-                    self.camera.id, delay, self._last_error,
+                    "กล้อง %s ต่อไม่ได้ (ครั้งที่ %d) จะลองใหม่ในอีก %.0f วินาที (%s)",
+                    self.camera.id, self._connect_attempts, delay, self._last_error,
                 )
                 if self._stop_event.wait(delay):
                     break
@@ -466,7 +448,9 @@ class RTSPFrameSource(FrameSource):
         try:
             capture = cv2.VideoCapture(self.camera.rtsp_url, cv2.CAP_FFMPEG)
         except Exception as exc:  # noqa: BLE001
-            self._last_error = f"สร้าง VideoCapture ไม่สำเร็จ: {exc}"
+            # ข้อความ error ของ OpenCV อาจมี URL เต็มติดมาด้วย ต้องปิดบังก่อนเก็บ
+            # เพราะค่านี้ถูกส่งออกไปทั้งใน log และใน /api/health
+            self._last_error = f"สร้าง VideoCapture ไม่สำเร็จ: {self._scrub(str(exc))}"
             return None
 
         if not capture.isOpened():
@@ -598,21 +582,38 @@ class RTSPFrameSource(FrameSource):
         with self._lock:
             frame_size = self._frame_size
 
+        alive = self.is_alive()
+
         return {
             "id": self.camera.id,
             "name": self.camera.name,
             "direction": self.camera.direction,
-            "source": "rtsp",
             "url": self.camera.safe_url(),  # ปิดบังรหัสผ่านแล้ว
+            # สามสถานะของเฟส 9 (ดูคำอธิบายที่ CAMERA_STATE_* ด้านบน)
+            "state": CAMERA_STATE_CONNECTED if alive else CAMERA_STATE_CONNECTING,
+            "installed": True,
+            "host_env": f"{self.camera.env_prefix}HOST",
             "connected": self._connected,
-            "alive": self.is_alive(),
+            "alive": alive,
             "received_frames": self._received_count,
             "reconnects": self._reconnect_count,
+            "connect_attempts": self._connect_attempts,
             "read_fps": round(self._read_meter.fps, 1),
             "resolution": list(frame_size) if frame_size else None,
             "last_frame_age_s": round(age, 1) if age is not None else None,
             "error": self._last_error,
         }
+
+    def _scrub(self, text: str) -> str:
+        """ลบรหัสผ่านกล้องออกจากข้อความใด ๆ ก่อนเอาไปแสดงหรือเขียน log
+
+        ใช้กับข้อความที่มาจากไลบรารีภายนอก (OpenCV / FFmpeg) ซึ่งเราคุมไม่ได้ว่า
+        จะแปะ URL เต็มมาด้วยหรือเปล่า ปิดทั้ง URL เต็มและตัวรหัสผ่านเดี่ยว ๆ
+        """
+        text = text.replace(self.camera.rtsp_url, self.camera.safe_url())
+        if self.camera.password:
+            text = text.replace(self.camera.password, "***")
+        return text
 
 
 def create_frame_sources(source_name: str) -> dict[str, FrameSource]:
@@ -621,13 +622,13 @@ def create_frame_sources(source_name: str) -> dict[str, FrameSource]:
     คืนเป็น dict ที่ใช้ "ชื่อกล้อง" เป็นกุญแจ เพราะโหมดกล้องหลายตัว
     มีได้หลายตัวพร้อมกัน ส่วนโหมดเว็บแคมเดี่ยวมีตัวเดียวชื่อ "browser"
 
-    ตั้งแต่เฟส 8 กล้องแต่ละตัวในโหมด rtsp เลือกชนิดของตัวเองได้:
+    ในโหมด rtsp กล้องแต่ละตัวได้แหล่งภาพตามสถานะการติดตั้ง (เฟส 9):
 
-        CAMERA_DOOR_IN_SOURCE=rtsp      -> RTSPFrameSource   (backend ไปดึงเอง)
-        CAMERA_DOOR_OUT_SOURCE=browser  -> BrowserFrameSource (เบราว์เซอร์ป้อนให้)
+        CAMERA_1_HOST=192.168.1.158  -> RTSPFrameSource         (backend ไปดึงเอง)
+        CAMERA_2_HOST=               -> NotInstalledFrameSource (ไม่ทำอะไรเลย)
 
-    ทั้งสองชนิดคืนออกไปในรูปแบบเดียวกัน ส่วนที่เหลือของระบบจึงไม่ต้องรู้ว่า
-    กล้องตัวไหนเป็นชนิดไหนเลย
+    ทั้งสองชนิดคืน status() รูปแบบเดียวกัน ส่วนที่เหลือของระบบจึงแสดงผล
+    กล้องทุกตัวได้ด้วยโค้ดชุดเดียว
 
     ห้ามมี fallback เงียบ ๆ: ถ้าชื่อไม่ตรงกับอะไรเลยต้องโยน error ให้เห็นชัด
     ไม่ใช่แอบคืน BrowserFrameSource มาให้แล้วผู้ใช้งงว่าทำไมกล้อง IP ไม่ทำงาน
@@ -646,10 +647,10 @@ def create_frame_sources(source_name: str) -> dict[str, FrameSource]:
 
         sources: dict[str, FrameSource] = {}
         for camera in enabled:
-            if camera.is_rtsp:
+            if camera.installed:
                 sources[camera.id] = RTSPFrameSource(camera)
             else:
-                sources[camera.id] = BrowserFrameSource(camera)
+                sources[camera.id] = NotInstalledFrameSource(camera)
         return sources
 
     raise ValueError(

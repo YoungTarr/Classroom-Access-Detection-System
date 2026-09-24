@@ -6,6 +6,7 @@
    เฟส 3-5: กรอบไหลลื่น + จดจำว่าเป็นใคร + ทิศทางการเคลื่อนที่
    เฟส 6-7: รับภาพจากกล้อง IP + แยกอัตรา fps สามค่า
    เฟส 8: แสดงกล้องหลายตัวพร้อมกัน (ขาเข้า / ขาออก)
+   เฟส 9: กล้องทุกตัวเป็นกล้อง IP + สถานะ "ยังไม่ได้ติดตั้งกล้อง"
 
    ============================================================================
    ไฟล์นี้ทำหน้าที่ "ประกอบ" อย่างเดียว
@@ -15,8 +16,8 @@
 
        overlay.js       FaceOverlay    วาดกรอบทับภาพหนึ่งภาพ
        stream-panel.js  StreamPanel    จอกล้องหนึ่งตัว (DOM + WebSocket + สถิติ)
-       webcam-feeder.js WebcamFeeder   ส่งเว็บแคมขึ้นไปเป็นกล้องตัวหนึ่ง
        camera.js        CameraController  เปิดเว็บแคม + จับภาพเป็น JPEG
+                                          (ใช้เฉพาะโหมดเว็บแคมเดี่ยว)
 
    ไฟล์นี้จึงเหลือแค่: โหลด config -> เลือกโหมด -> สร้างจอ -> สถานะระบบ -> รายชื่อ
 
@@ -27,10 +28,12 @@
    โหมดกล้องหลายตัว (FRAME_SOURCE=rtsp)  <- โหมดที่ใช้งานจริง
        backend ต่อกล้องเอง ตรวจเสร็จแล้ว push ภาพ+ผล มาให้หน้าเว็บ
        หน้าเว็บสร้างจอหนึ่งจอต่อกล้องหนึ่งตัว แล้วแสดงพร้อมกันทั้งหมด
-       กล้องตัวไหนที่ตั้ง SOURCE=browser หน้าเว็บจะเปิดเว็บแคมป้อนขึ้นไปให้ด้วย
+       **โหมดนี้ไม่แตะเว็บแคมของเครื่องเลย** (ไม่เรียก getUserMedia)
+       กล้องที่ยังไม่ได้ติดตั้งยังมีจอของตัวเอง แต่ขึ้นว่า "ยังไม่ได้ติดตั้งกล้อง"
 
-   โหมดเว็บแคมเดี่ยว (FRAME_SOURCE=browser)  <- ไว้พัฒนา/ทดสอบ
+   โหมดเว็บแคมเดี่ยว (FRAME_SOURCE=browser)  <- ไว้พัฒนา/ทดสอบตอนไม่มีกล้องเลย
        เบราว์เซอร์จับภาพเอง ส่งไปตรวจ แล้ววาดกรอบทับ <video> ในเครื่อง
+       เป็นโหมดของทั้งระบบ ไม่ได้ผูกกับกล้องตัวใดตัวหนึ่ง
 
    สำคัญ: เรียก API ด้วย path สัมพัทธ์ "/api/..." และ "/ws/..." เสมอ
    ห้ามเขียน http://localhost:8000 ตรง ๆ เพราะ
@@ -213,9 +216,6 @@ async function loadConfig() {
 /** จอกล้องทั้งหมดบนหน้าเว็บ: cameraId -> StreamPanel */
 const panels = new Map();
 
-/** ตัวส่งภาพเว็บแคมของกล้องที่ตั้ง SOURCE=browser: cameraId -> WebcamFeeder */
-const feeders = new Map();
-
 /** ผู้ใช้กดเริ่มดูภาพอยู่หรือไม่ */
 let camerasRunning = false;
 
@@ -250,7 +250,6 @@ async function buildCameraPanels() {
 
   el.cameraGrid.replaceChildren();
   panels.clear();
-  feeders.clear();
 
   cameras.forEach((cam) => {
     const panel = new StreamPanel(cam, {
@@ -260,113 +259,13 @@ async function buildCameraPanels() {
     panel.mount(el.cameraGrid);
     panel.applyCameraInfo(cam);
     panels.set(cam.id, panel);
-
-    // กล้องที่ใช้เว็บแคมของเครื่องนี้ ต้องมีตัวส่งภาพขึ้นไปให้ด้วย
-    // (กล้อง IP ไม่ต้องมี เพราะ backend ไปดึงเอง)
-    if (cam.source === 'browser') {
-      setupWebcamFeeder(panel, cam);
-    }
   });
-
-  // บอกให้ชัดว่าตอนนี้มีกล้องกี่ตัวและเป็นชนิดไหนบ้าง
-  const webcamCount = cameras.filter((c) => c.source === 'browser').length;
-  let hint = 'มีกล้อง ' + cameras.length + ' ตัว';
-  if (webcamCount > 0) {
-    hint += ' (ในนั้น ' + webcamCount + ' ตัวใช้เว็บแคมของเครื่องนี้ ' +
-            'ต้องกดอนุญาตใช้กล้องและเปิดหน้านี้ค้างไว้)';
-  }
-  setText(el.camerasHint, hint);
 
   updateSummary();
 }
 
-/**
- * เตรียมตัวส่งภาพเว็บแคม พร้อมช่องเลือกอุปกรณ์ในหัวจอนั้น
- *
- * ช่องเลือกอยู่ "ในจอของกล้องตัวนั้น" ไม่ใช่แถบควบคุมรวมด้านบน
- * เพราะถ้ามีกล้องแบบเว็บแคมมากกว่าหนึ่งตัวในอนาคต จะได้ไม่สับสนว่าอันไหนของใคร
- */
-function setupWebcamFeeder(panel, cam) {
-  const feeder = new WebcamFeeder(cam.id, {
-    getConfig: getConfig,
-    onStatus: (state, message) => {
-      // ปัญหาของการส่งภาพเป็นปัญหาของกล้องตัวนี้ตัวเดียว
-      // จึงรายงานลงในจอของตัวเอง ไม่ใช่กล่อง error รวมด้านบน
-      if (state === 'error') {
-        panel.showAlert(message);
-      } else if (state === 'ok') {
-        panel.showAlert(null);
-      }
-    },
-  });
-  feeders.set(cam.id, feeder);
-
-  // ---- ช่องเลือกเว็บแคม ----
-  const group = document.createElement('label');
-  group.className = 'control-group';
-
-  const label = document.createElement('span');
-  label.className = 'control-group__label';
-  label.textContent = 'เว็บแคม';
-
-  const select = document.createElement('select');
-  select.className = 'select';
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = '— กดเริ่มดูภาพเพื่อดูรายชื่อ —';
-  select.appendChild(placeholder);
-
-  select.addEventListener('change', async () => {
-    try {
-      await feeder.switchDevice(select.value || null);
-    } catch (err) {
-      panel.showAlert('สลับเว็บแคมไม่สำเร็จ: ' + err.message);
-    }
-  });
-
-  group.append(label, select);
-  panel.controls.appendChild(group);
-  panel.controls.hidden = false;
-
-  // เก็บไว้ให้ตอนเริ่มทำงานมาเติมรายชื่ออุปกรณ์
-  feeder.selectEl = select;
-}
-
-/** เติมรายชื่อเว็บแคมลงช่องเลือกของกล้องตัวนั้น */
-async function refreshFeederDevices(feeder) {
-  if (!feeder.selectEl) return;
-
-  let result;
-  try {
-    result = await feeder.listDevices();
-  } catch (err) {
-    return;
-  }
-
-  const select = feeder.selectEl;
-  const previous = select.value;
-  select.replaceChildren();
-
-  if (result.cameras.length === 0) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = '— ไม่พบเว็บแคมบนเครื่องนี้ —';
-    select.appendChild(opt);
-    return;
-  }
-
-  result.cameras.forEach((device, index) => {
-    const opt = document.createElement('option');
-    opt.value = device.deviceId;
-    // ถ้ายังไม่ได้สิทธิ์ label จะว่าง ต้องตั้งชื่อชั่วคราวให้ผู้ใช้พอเลือกได้
-    opt.textContent = device.label || ('กล้องตัวที่ ' + (index + 1) + ' (ยังไม่ทราบชื่อ)');
-    if (device.deviceId === previous) opt.selected = true;
-    select.appendChild(opt);
-  });
-}
-
 /** เริ่มดูภาพสดทุกกล้องพร้อมกัน */
-async function startAllCameras() {
+function startAllCameras() {
   if (camerasRunning) return;
   camerasRunning = true;
 
@@ -375,35 +274,16 @@ async function startAllCameras() {
   el.btnCameras.classList.remove('btn--primary');
   setText(el.camerasStatus, 'กำลังรับภาพสด');
 
-  // เปิดจอทุกตัวก่อน จอจะได้ขึ้นพร้อมกันโดยไม่ต้องรอเว็บแคมเปิดเสร็จ
+  // ทุกจอเปิด WebSocket ของตัวเองแยกกัน ตัวไหนล้มไม่กระทบตัวอื่น
+  // (จอของกล้องที่ยังไม่ได้ติดตั้งจะไม่เปิด WebSocket เลย - ดู StreamPanel.start)
   panels.forEach((panel) => panel.start());
-
-  // ---- กล้องที่ใช้เว็บแคม: เปิดกล้องแล้วเริ่มป้อนภาพ ----
-  // ทำทีละตัวแบบไม่ให้ตัวที่ล้มไปหยุดตัวอื่น
-  // (กล้อง IP ที่เปิดไปแล้วต้องไม่ถูกกระทบถ้าเว็บแคมเปิดไม่ได้)
-  for (const [cameraId, feeder] of feeders) {
-    const panel = panels.get(cameraId);
-    try {
-      await refreshFeederDevices(feeder);
-      await feeder.start(feeder.selectEl ? (feeder.selectEl.value || null) : null);
-      // เปิดได้แล้วค่อยเติมรายชื่ออีกรอบ ตอนนี้จะได้ชื่อจริงของกล้องมาแล้ว
-      await refreshFeederDevices(feeder);
-    } catch (err) {
-      if (panel) {
-        panel.showAlert(
-          'เปิดเว็บแคมสำหรับกล้องนี้ไม่สำเร็จ: ' + err.message + '\n' +
-          'กล้องตัวอื่นยังทำงานต่อได้ตามปกติ'
-        );
-      }
-    }
-  }
+  updateSummary();
 }
 
 /** หยุดดูภาพทุกกล้อง */
 function stopAllCameras() {
   camerasRunning = false;
 
-  feeders.forEach((feeder) => feeder.stop());
   panels.forEach((panel) => panel.stop());
 
   el.btnCameras.textContent = 'เริ่มดูภาพสดทุกกล้อง';
@@ -422,18 +302,36 @@ function updateSummary() {
   let faces = 0;
   let known = 0;
   let alive = 0;
+  let installed = 0;
 
   panels.forEach((panel) => {
     faces += panel.lastDetectedCount;
     known += panel.lastKnownCount;
     if (panel.alive) alive += 1;
+    if (panel.isInstalled) installed += 1;
   });
 
-  const total = panels.size;
+  // กล้องที่ยังไม่ได้ติดตั้งไม่นับเป็น "หลุด" (เฟส 9)
+  // ถ้านับรวม ระบบที่มีกล้องตัวเดียวและทำงานปกติดีจะขึ้นเตือนตลอดเวลา
+  // ผู้ใช้จะชินกับคำเตือนจนไม่สนใจ แล้วพอกล้องหลุดจริงก็ไม่มีใครเห็น
+  const notInstalled = panels.size - installed;
+  const down = installed - alive;
+
+  // บอกให้ชัดว่ามีกล้องกี่ตัว และติดตั้งจริงแล้วกี่ตัว
+  // คำนวณตรงนี้ (ไม่ใช่ตอนสร้างจอครั้งเดียว) เพราะติดตั้งกล้องเพิ่มได้ระหว่างเปิดหน้าค้างไว้
+  let hint = 'มีกล้อง ' + panels.size + ' ตัว';
+  if (notInstalled > 0) {
+    hint += ' (ติดตั้งแล้ว ' + installed + ' · ยังไม่ได้ติดตั้ง ' + notInstalled + ')';
+  }
+  setText(el.camerasHint, hint);
 
   setText(el.summaryFaces, faces + ' คน');
   setText(el.summaryKnown, known + ' คน');
-  setText(el.summaryCameras, alive + ' / ' + total + ' ตัว');
+  setText(
+    el.summaryCameras,
+    alive + ' / ' + installed + ' ตัว' +
+    (notInstalled > 0 ? ' (ยังไม่ได้ติดตั้ง ' + notInstalled + ')' : '')
+  );
 
   // สถานะรวม: บอกภาพใหญ่ในบรรทัดเดียว โดยไม่กลบรายละเอียดของแต่ละจอ
   let overall;
@@ -441,17 +339,17 @@ function updateSummary() {
 
   if (!camerasRunning) {
     overall = 'ยังไม่ได้เริ่มดูภาพ';
-  } else if (total === 0) {
-    overall = 'ไม่มีกล้องในระบบ';
-    cls += ' summary__value--error';
-  } else if (alive === total) {
-    overall = 'ปกติทุกกล้อง';
+  } else if (installed === 0) {
+    overall = 'ยังไม่ได้ติดตั้งกล้องเลย';
+    cls += ' summary__value--warn';
+  } else if (down === 0) {
+    overall = 'ปกติทุกกล้องที่ติดตั้ง';
     cls += ' summary__value--ok';
   } else if (alive === 0) {
     overall = 'ไม่มีกล้องส่งภาพเลย';
     cls += ' summary__value--error';
   } else {
-    overall = 'มีกล้องหลุด ' + (total - alive) + ' ตัว';
+    overall = 'มีกล้องหลุด ' + down + ' ตัว';
     cls += ' summary__value--warn';
   }
 
@@ -472,6 +370,9 @@ async function refreshCameraInfo() {
       const panel = panels.get(cam.id);
       if (panel) panel.applyCameraInfo(cam);
     });
+
+    // สถานะการติดตั้งอาจเปลี่ยน (เพิ่งใส่ HOST ให้กล้องตัวที่ 2) ต้องสรุปรวมใหม่ด้วย
+    updateSummary();
   } catch (err) {
     // สำรวจไม่สำเร็จไม่ใช่เรื่องใหญ่ รอบหน้าค่อยลองใหม่
     // (ถ้า backend ล่มจริง การ์ดสถานะด้านล่างจะฟ้องอยู่แล้ว)
@@ -1000,27 +901,33 @@ function renderCameraHealth(cameras) {
     const line = document.createElement('div');
     line.className = 'cam-line';
 
+    // ใช้ตัวแปลสถานะชุดเดียวกับจอกล้อง (stream-panel.js) ข้อความจะได้ตรงกันทุกที่
+    // เทา = ยังไม่ได้ติดตั้ง / เหลือง = กำลังเชื่อมต่อ / เขียว = ส่งภาพอยู่ / แดง = หลุด
+    const view = describeCameraState(cam);
+
     const dot = document.createElement('span');
-    // เขียว = ส่งภาพอยู่ / เหลือง = ต่อได้แต่ภาพไม่มา / แดง = หลุด
-    const state = cam.alive ? 'ok' : (cam.connected ? 'pending' : 'error');
-    dot.className = 'status__dot status__dot--' + state;
+    dot.className = 'status__dot status__dot--' + view.dot;
 
     const text = document.createElement('span');
-    const parts = [
-      cam.name,
-      '(' + cam.direction + ')',
-      cam.alive ? 'ส่งภาพอยู่' : (cam.connected ? 'ต่อได้แต่ภาพไม่มา' : 'หลุด'),
-    ];
+    const parts = [cam.name, '(' + cam.direction + ')', view.label];
 
-    // fps ที่อ่านได้จริงจากกล้องตัวนี้
-    if (cam.read_fps !== undefined && cam.read_fps !== null) {
-      parts.push(cam.read_fps + ' fps');
-    }
-    if (cam.reconnects) {
-      parts.push('ต่อใหม่ ' + cam.reconnects + ' ครั้ง');
-    }
-    if (!cam.alive && cam.error) {
-      parts.push('— ' + cam.error);
+    if (cam.state === 'not_installed') {
+      // บอกตรง ๆ ว่าต้องไปตั้งตัวแปรไหน ไม่ต้องให้ผู้ใช้เดา
+      parts.push('— ตั้ง ' + (cam.host_env || 'HOST') + ' ในไฟล์ .env เมื่อติดตั้งกล้องแล้ว');
+    } else {
+      // fps ที่อ่านได้จริงจากกล้องตัวนี้
+      if (cam.read_fps !== undefined && cam.read_fps !== null) {
+        parts.push(cam.read_fps + ' fps');
+      }
+      if (cam.reconnects) {
+        parts.push('หลุดแล้วต่อใหม่ ' + cam.reconnects + ' ครั้ง');
+      }
+      if (!cam.alive && cam.connect_attempts) {
+        parts.push('พยายามต่อ ' + cam.connect_attempts + ' ครั้ง');
+      }
+      if (!cam.alive && cam.error) {
+        parts.push('— ' + cam.error);
+      }
     }
 
     text.textContent = parts.join('  ');
@@ -1183,7 +1090,6 @@ window.addEventListener('beforeunload', () => {
   stopDetection();
   webcamOverlay.stop();
   camera.stop();
-  feeders.forEach((feeder) => feeder.stop());
   panels.forEach((panel) => panel.stop());
 });
 

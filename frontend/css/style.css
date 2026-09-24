@@ -366,6 +366,11 @@ body {
 .status__dot--ok    { background: var(--ok); }
 .status__dot--error { background: var(--error); }
 
+/* เทา ไม่กะพริบ = กล้องที่ยังไม่ได้ติดตั้ง (เฟส 9)
+   ตั้งใจให้ "นิ่งและจืด" เพราะไม่ใช่ปัญหาที่ต้องรีบไปดู
+   ถ้าใช้สีแดงเหมือนกล้องหลุด ผู้ใช้จะชินกับสีแดงจนไม่สนใจตอนกล้องหลุดจริง */
+.status__dot--idle  { background: transparent; border: 2px solid var(--text-dim); }
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.3; }
@@ -588,10 +593,14 @@ body {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
+/* ส่วนหัวข้อยืดเต็มที่เหลือ แล้วตัดบรรทัดรองด้วย … ถ้ายาวเกิน
+   ถ้าปล่อยให้ขึ้นบรรทัดใหม่ จุดสถานะจะหล่นลงไปอีกแถว แล้วภาพของจอนั้น
+   จะเริ่มต่ำกว่าจออีกตัว (บรรทัดรองของกล้อง IP มี URL จึงยาวกว่าของกล้องที่ยังไม่ติดตั้ง) */
 .cam__titles {
+  flex: 1 1 0;
   min-width: 0;
 }
 
@@ -606,6 +615,9 @@ body {
   margin: 2px 0 0;
   font-size: 12px;
   color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .cam__state {
@@ -618,22 +630,6 @@ body {
 
 .cam__state-text {
   color: var(--text-dim);
-}
-
-/* อยู่ "ใต้" กล่องภาพ เพื่อให้ภาพของทุกจอเริ่มที่ความสูงเดียวกัน
-   (จอกล้อง IP ไม่มีแถบนี้ ส่วนจอเว็บแคมมี ถ้าวางไว้ด้านบนภาพจะเหลื่อมกัน) */
-.cam__controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-
-/* .cam__controls ตั้ง display:flex ซึ่งชนะ [hidden] ของเบราว์เซอร์
-   เหตุผลเดียวกับ .controls ด้านบน ต้องเขียนกฎนี้ไม่งั้นซ่อนไม่ลง */
-.cam__controls[hidden] {
-  display: none;
 }
 
 /* ---------------------------------------------------------------------------
@@ -681,6 +677,27 @@ body {
   font-size: 12px;
   color: var(--text-dim);
   max-width: 46ch;
+}
+
+/* ---------------------------------------------------------------------------
+   กรอบ "ยังไม่ได้ติดตั้งกล้อง" (เฟส 9)
+
+   ใช้โครงเดียวกับกรอบกล้องหลุด แต่ต้องดูออกทันทีว่าเป็นคนละเรื่อง:
+     กล้องหลุด          กรอบเส้นทึบ + ข้อความสาเหตุสีแดง  = มีปัญหา ต้องไปดู
+     ยังไม่ได้ติดตั้ง    กรอบเส้นประ + ข้อความโทนกลาง ๆ    = ปกติ แค่ยังไม่มีของ
+   --------------------------------------------------------------------------- */
+.cam__offline--not-installed {
+  background: var(--bg);
+  border-style: dashed;
+  border-color: var(--border);
+}
+
+.cam__offline--not-installed .cam__offline-title {
+  color: var(--text);
+}
+
+.cam__offline--not-installed .cam__offline-reason {
+  color: var(--text-dim);
 }
 
 /* ชุดสถิติในจอกล้องแคบกว่าของการ์ดใหญ่ จึงลดความกว้างขั้นต่ำของช่องลง

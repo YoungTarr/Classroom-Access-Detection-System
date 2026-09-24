@@ -34,9 +34,9 @@
 เฟส 8: มีตัวขับหนึ่งตัวต่อหนึ่งกล้อง เดินขนานกันไป
 ============================================================================
 
-    CameraRunner(door_in)   ---.
+    CameraRunner(1 ขาเข้า)  ---.
                                 >--- DetectScheduler (ประตูบานเดียว) ---> โมเดล AI
-    CameraRunner(door_out)  ---'                                          (ชุดเดียว)
+    CameraRunner(2 ขาออก)   ---'                                          (ชุดเดียว)
 
 ทุกอย่างที่เป็น "สถานะของกล้อง" แยกกันคนละชุด (thread อ่านกล้อง, tracker, สถิติ)
 ส่วนทุกอย่างที่เป็น "โมเดล" ใช้ร่วมกันชุดเดียว (ดูรายละเอียดในหัวคลาส CameraRunner)
@@ -133,8 +133,8 @@ class CameraRunner:
         scheduler: DetectScheduler,
     ) -> None:
         # รับ FrameSource แบบกว้าง ๆ ไม่เจาะจงว่าเป็น RTSP โดยตั้งใจ
-        # เพราะกล้องตัวหนึ่งอาจเป็นเว็บแคมที่เบราว์เซอร์ป้อนภาพให้ (เฟส 8)
-        # โค้ดในคลาสนี้ใช้แค่ source.read() กับ source.camera จึงไม่ต้องรู้ชนิด
+        # RTSP กับตัวทดแทนอื่นใช้ interface เดียวกัน โค้ดในคลาสนี้ใช้แค่
+        # source.read() กับ source.camera จึงไม่ต้องรู้ว่าเป็นชนิดไหน
         self.source = source
         self.camera = source.camera
         self.camera_id = source.camera.id
@@ -190,10 +190,9 @@ class CameraRunner:
             self._stream_loop(), name=f"stream-{self.camera_id}"
         )
         logger.info(
-            "เริ่มตัวขับสตรีมกล้อง %s [%s] (capture=%d detect=%d/กล้อง stream=%d fps, "
+            "เริ่มตัวขับสตรีมกล้อง %s (capture=%d detect=%d/กล้อง stream=%d fps, "
             "เพดานตรวจจับรวมทั้งระบบ %d fps)",
             self.camera_id,
-            self.camera.source,
             settings.rates.capture_fps,
             settings.rates.detect_fps,
             settings.rates.stream_fps,
@@ -388,7 +387,6 @@ class CameraRunner:
             "camera": self.camera_id,
             "camera_name": self.camera.name,
             "direction": self.camera.direction,
-            "camera_source": self.camera.source,
             "frame_id": self._stream_frame_id,
             "is_fresh": is_fresh,
             "is_stale": is_stale,
@@ -449,7 +447,6 @@ class CameraRunner:
             "camera": self.camera_id,
             "name": self.camera.name,
             "direction": self.camera.direction,
-            "source": self.camera.source,
             "viewers": len(self._subscribers),
             "configured_fps": {
                 "capture": settings.rates.capture_fps,
