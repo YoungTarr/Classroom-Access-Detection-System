@@ -37,6 +37,11 @@
         <span class="controls__hint" id="cameras-hint"></span>
       </div>
 
+      <!-- แถบเตือนเรื่อง config กล้อง (เฟส 10) - มาจาก config_warnings ของ /api/cameras
+           อยู่บนสุดของพื้นที่กล้อง เพราะถ้า config ผิด ตัวเลขทุกอย่างข้างล่างก็เชื่อไม่ได้
+           เนื้อหาถูกสร้างด้วย JavaScript (textContent ล้วน ไม่ใช้ innerHTML) -->
+      <div class="alert alert--warn config-warnings" id="config-warnings" hidden></div>
+
       <!-- สรุปรวมทุกกล้อง - ต้องอยู่เหนือจอกล้อง เพราะเป็นภาพรวมที่ดูก่อน -->
       <div class="summary">
         <div class="summary__item">

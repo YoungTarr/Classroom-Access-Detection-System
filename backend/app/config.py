@@ -141,7 +141,7 @@ class AppSettings:
     """ค่าทั่วไปของแอปพลิเคชัน"""
 
     name: str = "Classroom Access Detection System"
-    version: str = "0.8.0"  # เฟส 8: กล้องสองตัวพร้อมกัน (ขาเข้า / ขาออก)
+    version: str = "0.10.0"  # เฟส 10: ตรวจ config กล้องตอนสตาร์ท
     log_level: str = "INFO"
     timezone: str = "Asia/Bangkok"
 
@@ -570,7 +570,7 @@ def _camera_env_prefix(camera_id: str) -> str:
     return f"CAMERA_{cleaned}_"
 
 
-def _load_cameras(require_credentials: bool) -> list[CameraSettings]:
+def _load_cameras() -> list[CameraSettings]:
     """อ่านรายการกล้องทั้งหมดจาก environment
 
     รูปแบบใน .env ออกแบบให้เพิ่มกล้องได้โดยไม่ต้องแก้โค้ด
@@ -638,21 +638,11 @@ def _load_cameras(require_credentials: bool) -> list[CameraSettings]:
         username = _get_str(f"{prefix}USER", default_user)
         password = _get_str(f"{prefix}PASSWORD", default_password)
 
-        # บัญชีกล้องขาดไม่ได้ ถ้าไม่มีจะต่อไม่ได้แน่นอน จึงฟ้องตั้งแต่ตอนสตาร์ท
-        # ดีกว่าปล่อยให้ไปเจอ error กำกวมจาก FFmpeg ตอน runtime
-        #
-        # แต่ตรวจเฉพาะกล้องที่จะต่อจริงเท่านั้น
-        # (FRAME_SOURCE=rtsp + เปิดใช้งาน + ติดตั้งแล้วคือมี HOST)
-        # กล้องที่ยังไม่ได้ติดตั้งต้องไม่ทำให้ระบบสตาร์ทไม่ขึ้น
-        # ไม่งั้นก็ต้องไปกรอกบัญชีปลอม ๆ ให้กล้องที่ยังไม่ได้ซื้อ
-        if require_credentials and enabled and host and (not username or not password):
-            raise ConfigError(
-                f"กล้อง {camera_id!r} ยังไม่ได้ตั้งบัญชีผู้ใช้\n"
-                f"กำหนด {prefix}USER และ {prefix}PASSWORD "
-                f"หรือใช้ค่ากลาง CAMERA_DEFAULT_USER / CAMERA_DEFAULT_PASSWORD\n"
-                f"(สำหรับกล้อง TP-Link Tapo คือบัญชีที่ตั้งไว้ในแอปที่เมนู "
-                f"Advanced Settings > Camera Account)"
-            )
+        # บัญชีกล้องที่ขาด (USER / PASSWORD ว่างทั้งของตัวเองและค่ากลาง)
+        # เดิมโยน ConfigError หยุดทั้งระบบ แต่ตั้งแต่เฟส 10 เปลี่ยนเป็น "คำเตือน"
+        # (ดู config_check.py) เพราะกล้องตัวเดียวตั้งค่าผิดไม่ควรทำให้กล้องอีกตัว
+        # และหน้าเว็บทั้งหมดใช้ไม่ได้ไปด้วย ผู้ใช้จะเห็นแค่ container restart วน
+        # ส่วนกล้องตัวที่ขาดบัญชีจะขึ้นสีแดงพร้อมสาเหตุ + แถบเตือนบอกชื่อตัวแปรที่ต้องตั้ง
 
         direction = _get_str(f"{prefix}DIRECTION", "IN").upper()
         if direction not in VALID_CAMERA_DIRECTIONS:
@@ -695,7 +685,7 @@ def load_settings() -> Settings:
             f"(รองรับเฉพาะ {' หรือ '.join(VALID_IDENTIFIERS)})"
         )
 
-    cameras = _load_cameras(require_credentials=(frame_source == "rtsp"))
+    cameras = _load_cameras()
     enabled_cameras = [c for c in cameras if c.enabled]
 
     if frame_source == "rtsp" and not enabled_cameras:

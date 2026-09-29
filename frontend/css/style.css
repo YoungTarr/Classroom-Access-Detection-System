@@ -620,6 +620,67 @@ body {
   text-overflow: ellipsis;
 }
 
+/* URL ของกล้อง (เฟส 10) - เด่นกว่าบรรทัดรอง เพราะใช้วินิจฉัยปัญหาได้ดีที่สุด
+   แต่ยังเป็นบรรทัดเดียวเสมอ (ตัดด้วย ...) เพื่อให้หัวจอทุกจอสูงเท่ากัน */
+.cam__url {
+  display: block;
+  max-width: 100%;
+  margin-top: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+  width: fit-content;
+}
+
+.cam__url--none {
+  color: var(--text-dim);
+  border-style: dashed;
+}
+
+/* กล้องที่อยู่ในคำเตือนเรื่อง config เช่น IP ซ้ำกับกล้องอีกตัว */
+.cam__url--warn {
+  color: var(--warn);
+  border-color: rgba(255, 176, 32, 0.6);
+  background: rgba(255, 176, 32, 0.08);
+}
+
+/* แถบเตือนเรื่อง config กล้อง (เฟส 10) อยู่เหนือพื้นที่กล้อง */
+.config-warnings {
+  margin: 0 0 14px;
+  white-space: normal;
+}
+
+.config-warnings__title {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+
+.config-warnings__list {
+  margin: 0;
+  padding-left: 22px;
+}
+
+.config-warnings__list li {
+  margin: 4px 0;
+  /* ข้อความจาก backend มีขึ้นบรรทัดใหม่ในตัว (\n) ต้องแสดงตามนั้น */
+  white-space: pre-wrap;
+}
+
+.config-warnings__hint {
+  margin: 8px 0 0;
+  font-size: 13px;
+  opacity: 0.85;
+}
+
 .cam__state {
   display: flex;
   align-items: center;

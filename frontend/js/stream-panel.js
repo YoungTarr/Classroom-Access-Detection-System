@@ -190,9 +190,16 @@ class StreamPanel {
     // บรรทัดรองบอกชื่อกล้องที่ตั้งใน .env และที่อยู่ของกล้อง (ปิดบังรหัสผ่านแล้ว)
     this.subtitle = document.createElement('p');
     this.subtitle.className = 'cam__subtitle';
+
+    // URL ของกล้องแยกเป็นบรรทัดของตัวเอง ตัวอักษรแบบ monospace (เฟส 10)
+    // เพราะเป็นข้อมูลที่ใช้วินิจฉัยได้ดีที่สุด (เช่นเห็นทันทีว่าสองจอ IP ซ้ำกัน)
+    // จอที่ยังไม่ได้ติดตั้งก็มีบรรทัดนี้ด้วย หัวจอทุกจอจึงสูงเท่ากัน ภาพเริ่มระดับเดียวกัน
+    // title เก็บ URL เต็มไว้ เผื่อจอแคบจนข้อความถูกตัดเป็น ...
+    this.urlLine = document.createElement('code');
+    this.urlLine.className = 'cam__url';
     this._renderSubtitle();
 
-    titleWrap.append(title, this.subtitle);
+    titleWrap.append(title, this.subtitle, this.urlLine);
 
     // จุดสถานะของกล้องตัวนี้ (แยกจากสถานะรวมของระบบ)
     const state = document.createElement('div');
@@ -290,8 +297,21 @@ class StreamPanel {
   _renderSubtitle() {
     const cam = this.camera;
     this.subtitle.textContent = this.isInstalled
-      ? cam.name + ' · กล้อง IP · ' + (cam.url || '')
+      ? cam.name + ' · กล้อง IP'
       : cam.name + ' · ยังไม่ได้ติดตั้งกล้อง';
+
+    // URL จาก backend ถูกปิดบังชื่อผู้ใช้/รหัสผ่านไว้แล้วเสมอ (safe_url)
+    const url = this.isInstalled
+      ? (cam.url || '—')
+      : 'ไม่ได้ตั้ง ' + (cam.host_env || 'CAMERA_<ชื่อ>_HOST');
+    this.urlLine.textContent = url;
+    this.urlLine.title = url;
+    this.urlLine.classList.toggle('cam__url--none', !this.isInstalled);
+  }
+
+  /** ไฮไลต์ URL เป็นสีเหลืองเมื่อกล้องตัวนี้อยู่ในคำเตือนเรื่อง config (เฟส 10) */
+  setConfigWarned(warned) {
+    this.urlLine.classList.toggle('cam__url--warn', Boolean(warned));
   }
 
   /**

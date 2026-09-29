@@ -127,6 +127,10 @@ docker compose logs -f backend
 docker compose restart backend
 ```
 
+> **แก้ `.env` แล้วต้องใช้ `docker compose up -d backend` แทน** — `restart` ใช้ container ตัวเดิม
+> ซึ่งจำค่า environment เก่าไว้ ค่าใหม่จึงไม่มีผลและไม่มีอะไรฟ้อง
+> ขั้นตอนย้ายขึ้น Raspberry Pi ทั้งหมดอยู่ใน [docs/DEPLOY.md](docs/DEPLOY.md)
+
 หยุดทั้งระบบ (ข้อมูลใน DB ยังอยู่):
 
 ```bash
@@ -149,6 +153,7 @@ backend/
   app/
     main.py                  FastAPI app, routes, WebSocket, startup
     config.py                ค่า config ทุกตัวรวมไว้ที่เดียว อ่านจาก environment
+    config_check.py          ตรวจ config กล้องที่รันได้แต่น่าจะผิด แล้วเตือน     [เฟส 10]
     db/database.py           ต่อ PostgreSQL, query members
     face/detector.py         โหลด InsightFace (detection + recognition)     [เฟส 2]
     face/recognizer.py       สกัด embedding + normalize                     [เฟส 4]
@@ -218,6 +223,7 @@ data/faces/<รหัสนักศึกษา>/right.jpg
 | 7 | แยกอัตรา fps ให้ภาพลื่นขึ้น | ✅ เสร็จแล้ว |
 | 8 | กล้องสองตัวพร้อมกัน (ขาเข้า / ขาออก) | ✅ เสร็จแล้ว |
 | 9 | กล้องขาออกเป็น RTSP + สถานะ "ยังไม่ได้ติดตั้งกล้อง" | 🔄 รอทดสอบ |
+| 10 | ตรวจ config กล้องตอนสตาร์ท + แถบเตือนบนหน้าเว็บ + [คู่มือ deploy ขึ้น Pi](docs/DEPLOY.md) | 🔄 รอทดสอบ |
 
 ---
 

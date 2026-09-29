@@ -7,6 +7,7 @@
    เฟส 6-7: รับภาพจากกล้อง IP + แยกอัตรา fps สามค่า
    เฟส 8: แสดงกล้องหลายตัวพร้อมกัน (ขาเข้า / ขาออก)
    เฟส 9: กล้องทุกตัวเป็นกล้อง IP + สถานะ "ยังไม่ได้ติดตั้งกล้อง"
+   เฟส 10: แถบเตือนเมื่อ config กล้องน่าสงสัย (เช่นสองกล้องชี้ IP เดียวกัน)
 
    ============================================================================
    ไฟล์นี้ทำหน้าที่ "ประกอบ" อย่างเดียว
@@ -82,6 +83,7 @@ const el = {
   camerasHint: byId('cameras-hint'),
   cameraGrid: byId('camera-grid'),
   camerasError: byId('cameras-error'),
+  configWarnings: byId('config-warnings'),
   summaryFaces: byId('summary-faces'),
   summaryKnown: byId('summary-known'),
   summaryCameras: byId('summary-cameras'),
@@ -219,6 +221,54 @@ const panels = new Map();
 /** ผู้ใช้กดเริ่มดูภาพอยู่หรือไม่ */
 let camerasRunning = false;
 
+/** คำเตือนเรื่อง config กล้องจาก backend (เฟส 10) - ว่าง = ไม่พบปัญหา */
+let configWarnings = [];
+
+/**
+ * แสดงแถบเตือนสีเหลืองเหนือพื้นที่กล้อง (เฟส 10)
+ *
+ * สร้าง DOM ด้วย textContent ทั้งหมด เพราะข้อความมีค่าจาก .env ปนอยู่ (ชื่อกล้อง / IP)
+ */
+function renderConfigWarnings(warnings, applyHint) {
+  configWarnings = Array.isArray(warnings) ? warnings : [];
+  const box = el.configWarnings;
+
+  if (configWarnings.length === 0) {
+    box.replaceChildren();
+    box.hidden = true;
+    markWarnedPanels();
+    return;
+  }
+
+  const title = document.createElement('p');
+  title.className = 'config-warnings__title';
+  title.textContent = 'พบการตั้งค่ากล้องที่ควรตรวจสอบ ' + configWarnings.length +
+    ' ข้อ — ระบบยังทำงานอยู่ แต่ผลที่เห็นอาจไม่ตรงกับความจริง';
+
+  const list = document.createElement('ol');
+  list.className = 'config-warnings__list';
+  configWarnings.forEach((w) => {
+    const item = document.createElement('li');
+    item.textContent = w.message;
+    list.appendChild(item);
+  });
+
+  const hint = document.createElement('p');
+  hint.className = 'config-warnings__hint';
+  hint.textContent = applyHint || 'แก้ไฟล์ .env แล้วสั่ง docker compose up -d backend';
+
+  box.replaceChildren(title, list, hint);
+  box.hidden = false;
+  markWarnedPanels();
+}
+
+/** ทำให้ URL ใต้หัวจอของกล้องที่ถูกเตือนเป็นสีเหลือง จะได้เห็นว่าจอไหนเกี่ยว */
+function markWarnedPanels() {
+  const warned = new Set();
+  configWarnings.forEach((w) => (w.cameras || []).forEach((id) => warned.add(String(id))));
+  panels.forEach((panel, id) => panel.setConfigWarned(warned.has(String(id))));
+}
+
 /**
  * สร้างจอให้ครบทุกกล้องตามรายการจาก backend
  *
@@ -237,6 +287,8 @@ async function buildCameraPanels() {
   }
 
   const cameras = (data.cameras || []).filter((c) => c.enabled);
+
+  renderConfigWarnings(data.config_warnings, data.config_apply_hint);
 
   if (cameras.length === 0) {
     showAlert(
@@ -261,6 +313,7 @@ async function buildCameraPanels() {
     panels.set(cam.id, panel);
   });
 
+  markWarnedPanels();
   updateSummary();
 }
 
@@ -342,6 +395,11 @@ function updateSummary() {
   } else if (installed === 0) {
     overall = 'ยังไม่ได้ติดตั้งกล้องเลย';
     cls += ' summary__value--warn';
+  } else if (down === 0 && configWarnings.length > 0) {
+    // ภาพมาครบทุกจอ แต่ config น่าสงสัย (เช่นสองกล้องชี้ IP เดียวกัน) - เฟส 10
+    // ห้ามขึ้น "ปกติ" เด็ดขาด เพราะนั่นคือสิ่งที่ทำให้ปัญหานี้เงียบมาตั้งแต่แรก
+    overall = 'ทำงานอยู่ แต่มีข้อควรตรวจสอบ';
+    cls += ' summary__value--warn';
   } else if (down === 0) {
     overall = 'ปกติทุกกล้องที่ติดตั้ง';
     cls += ' summary__value--ok';
@@ -370,6 +428,8 @@ async function refreshCameraInfo() {
       const panel = panels.get(cam.id);
       if (panel) panel.applyCameraInfo(cam);
     });
+
+    renderConfigWarnings(data.config_warnings, data.config_apply_hint);
 
     // สถานะการติดตั้งอาจเปลี่ยน (เพิ่งใส่ HOST ให้กล้องตัวที่ 2) ต้องสรุปรวมใหม่ด้วย
     updateSummary();

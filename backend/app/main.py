@@ -27,6 +27,7 @@ from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.config_check import APPLY_HINT, check_camera_config
 from app.core.frame_source import (
     BrowserFrameSource,
     FrameDecodeError,
@@ -152,6 +153,31 @@ async def lifespan(_: FastAPI):
                 camera.safe_url(),  # ปิดบังรหัสผ่านไว้แล้ว
                 label,
             )
+
+    # ---- ตรวจ config กล้องที่ "รันได้แต่น่าจะผิด" (เฟส 10) ----
+    # เตือนอย่างเดียว ไม่หยุดระบบ (ดูเหตุผลใน config_check.py)
+    # เก็บผลไว้ใน app.state ให้ /api/health และ /api/cameras ส่งต่อไปถึงหน้าเว็บ
+    # ตรวจครั้งเดียวพอ เพราะ config อ่านครั้งเดียวตอนสตาร์ท เปลี่ยนระหว่างรันไม่ได้
+    try:
+        app.state.config_warnings = check_camera_config(settings)
+    except Exception:  # noqa: BLE001 - ตัวตรวจพังเองต้องไม่ทำให้ระบบล่ม
+        logger.exception("ตรวจ config กล้องไม่สำเร็จ (ข้ามการตรวจ ระบบทำงานต่อ)")
+        app.state.config_warnings = []
+
+    if app.state.config_warnings:
+        # ทำเป็นกล่องเด่น ๆ ใน log เพราะบรรทัดตอนสตาร์ทมีเยอะ คำเตือนบรรทัดเดียวจะจมหาย
+        logger.warning("!" * 70)
+        logger.warning(
+            "พบการตั้งค่ากล้องที่ควรตรวจสอบ %d ข้อ (ระบบยังทำงานต่อ)",
+            len(app.state.config_warnings),
+        )
+        for index, item in enumerate(app.state.config_warnings, start=1):
+            for line_no, line in enumerate(item.message.splitlines()):
+                logger.warning("  %s %s", f"{index}." if line_no == 0 else "  ", line)
+        logger.warning("  -> %s", APPLY_HINT)
+        logger.warning("!" * 70)
+    elif settings.stream.source == "rtsp":
+        logger.info("ตรวจ config กล้องแล้ว ไม่พบสิ่งผิดปกติ")
 
     # ---- ประตูคิวตรวจจับที่กล้องทุกตัวใช้ร่วมกัน (เฟส 8) ----
     # สร้างก่อนตัวขับสตรีม เพราะทุกตัวต้องได้ตัวเดียวกันนี้ไป
@@ -316,6 +342,10 @@ def health(response: Response) -> dict[str, Any]:
             # ดูได้ว่ากล้องแต่ละตัวได้คิวตรวจไปกี่ครั้ง (ต้องใกล้เคียงกัน = แบ่งกันยุติธรรม)
             source_status["detect_scheduler"] = scheduler.status()
 
+    # คำเตือนเรื่อง config (เฟส 10) - ไม่ทำให้ status เป็น degraded / 503
+    # เพราะระบบยังทำงานได้จริง แค่มีค่าที่น่าจะตั้งผิด ต้องให้คนมาดู
+    config_warnings = [w.as_dict() for w in getattr(app.state, "config_warnings", [])]
+
     db_ok = db_health.connected and db_health.error is None
     face_ok = face_status["loaded"] and face_status["recognition_loaded"]
 
@@ -333,8 +363,9 @@ def health(response: Response) -> dict[str, Any]:
         "app": {
             "name": settings.app.name,
             "version": settings.app.version,
-            "phase": 9,
+            "phase": 10,
         },
+        "config_warnings": config_warnings,
         "database": {
             "connected": db_health.connected,
             "version": db_health.version,
@@ -468,6 +499,10 @@ def list_cameras() -> dict[str, Any]:
         "total": len(cameras),
         "enabled": sum(1 for c in cameras if c["enabled"]),
         "cameras": cameras,
+        # หน้าเว็บใช้แสดงแถบเตือนสีเหลืองเหนือจอกล้อง (เฟส 10)
+        # ใส่ใน endpoint นี้ด้วยเพราะหน้าเว็บสำรวจ /api/cameras เป็นระยะอยู่แล้ว
+        "config_warnings": [w.as_dict() for w in getattr(app.state, "config_warnings", [])],
+        "config_apply_hint": APPLY_HINT,
     }
 
 
