@@ -141,7 +141,7 @@ class AppSettings:
     """ค่าทั่วไปของแอปพลิเคชัน"""
 
     name: str = "Classroom Access Detection System"
-    version: str = "0.10.0"  # เฟส 10: ตรวจ config กล้องตอนสตาร์ท
+    version: str = "0.12.0"  # เฟส 12: บันทึกประวัติเข้า-ออกลง PostgreSQL
     log_level: str = "INFO"
     timezone: str = "Asia/Bangkok"
 
@@ -528,6 +528,22 @@ class StreamSettings:
 
 
 @dataclass(frozen=True)
+class AccessLogSettings:
+    """ค่าของการบันทึกประวัติเข้า-ออกห้อง (เฟส 12)"""
+
+    # ปิดได้ถ้าอยากทดสอบระบบจดจำโดยไม่เขียนฐานข้อมูล
+    enabled: bool
+
+    # คนเดิม + ทิศทางเดิม ห่างกันไม่ถึงกี่วินาทีจะไม่บันทึกซ้ำ
+    # กันกรณียืนหน้ากล้องนาน ๆ แล้ว track ขาดแล้วสร้างใหม่ จนบันทึกรัว
+    cooldown_seconds: float
+
+    # ขนาดคิวรอเขียนฐานข้อมูล เต็มแล้วจะทิ้งรายการใหม่พร้อมนับไว้ใน /api/health
+    # (ไม่ปล่อยให้คิวโตไม่จำกัดจนกินแรม ถ้าฐานข้อมูลล่มนาน)
+    queue_size: int
+
+
+@dataclass(frozen=True)
 class Settings:
     """รวมทุกกลุ่มไว้ในที่เดียว เรียกใช้ผ่านตัวแปร settings ด้านล่าง"""
 
@@ -540,6 +556,7 @@ class Settings:
     direction: DirectionSettings
     rtsp: RTSPSettings
     rates: RateSettings
+    access_log: AccessLogSettings
 
 
 # แหล่งภาพที่ระบบรองรับ - ใส่ค่านอกเหนือจากนี้ต้องฟ้อง ไม่ใช่เงียบ ๆ แล้วใช้ค่า default
@@ -771,6 +788,11 @@ def load_settings() -> Settings:
             watchdog_timeout=_get_float("RTSP_WATCHDOG_TIMEOUT", 5.0),
             reconnect_initial_delay=_get_float("RTSP_RECONNECT_INITIAL_DELAY", 1.0),
             reconnect_max_delay=_get_float("RTSP_RECONNECT_MAX_DELAY", 30.0),
+        ),
+        access_log=AccessLogSettings(
+            enabled=_get_bool("ACCESS_LOG_ENABLED", True),
+            cooldown_seconds=_get_float("ACCESS_LOG_COOLDOWN_SECONDS", 30.0),
+            queue_size=_get_int("ACCESS_LOG_QUEUE_SIZE", 200),
         ),
         rates=RateSettings(
             capture_fps=_get_int("CAPTURE_FPS", 15),

@@ -647,7 +647,8 @@ body {
    show-debug ที่ <body> เพื่อเปิดดู (จำค่าไว้ใน localStorage)
    --------------------------------------------------------------------------- */
 body:not(.show-debug) .cam__url,
-body:not(.show-debug) .stats--cam {
+body:not(.show-debug) .stats--cam,
+body:not(.show-debug) .debug-only {
   display: none;
 }
 

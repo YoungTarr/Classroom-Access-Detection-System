@@ -506,8 +506,11 @@ function buildLabel(entry) {
 
   if (entry.identityState === 'recognized' && ident) {
     const name = [ident.first_name, ident.last_name].filter(Boolean).join(' ');
+    const text = ident.student_id + '  ' + name;
+    // เปอร์เซ็นต์ความคล้ายเป็นข้อมูลเทคนิค แสดงเฉพาะโหมดดีบัก (ปุ่ม 'แสดงข้อมูลเทคนิค')
+    if (!document.body.classList.contains('show-debug')) return text;
     const percent = Math.round((ident.confidence || 0) * 100);
-    return ident.student_id + '  ' + name + '  ' + percent + '%';
+    return text + '  ' + percent + '%';
   }
 
   if (entry.identityState === 'unknown') {

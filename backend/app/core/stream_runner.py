@@ -49,10 +49,12 @@ import json
 import logging
 import struct
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
+from app.core.access_logger import AccessEvent, AccessLogger
 from app.core.detect_scheduler import DetectScheduler
 from app.core.frame_source import FrameSource
 from app.core.pipeline import Pipeline
@@ -131,6 +133,7 @@ class CameraRunner:
         source: FrameSource,
         identifier: Identifier | None,
         scheduler: DetectScheduler,
+        access_logger: AccessLogger | None = None,
     ) -> None:
         # รับ FrameSource แบบกว้าง ๆ ไม่เจาะจงว่าเป็น RTSP โดยตั้งใจ
         # RTSP กับตัวทดแทนอื่นใช้ interface เดียวกัน โค้ดในคลาสนี้ใช้แค่
@@ -141,6 +144,12 @@ class CameraRunner:
 
         # ประตูคิวที่ใช้ร่วมกับกล้องตัวอื่น (ดูคำอธิบายใน core/detect_scheduler.py)
         self.scheduler = scheduler
+
+        # ตัวบันทึกประวัติเข้า-ออก (ใช้ร่วมกันทุกกล้อง) กับ track ที่บันทึกไปแล้วของกล้องนี้
+        # เก็บเป็น (track_id, student_id) เพื่อให้ track เดียวบันทึกได้ครั้งเดียวต่อคน
+        # แต่ถ้าผลโหวตเปลี่ยนไปเป็นอีกคน (แก้ที่เคยจำผิด) ก็บันทึกคนใหม่ได้
+        self.access_logger = access_logger
+        self._logged_keys: set[tuple[int, str]] = set()
 
         # pipeline ตัวเดียวต่อกล้อง (ตัวติดตามจำ track ไว้ข้างใน จึงห้ามใช้ร่วมข้ามกล้อง)
         # แต่ตัวตรวจจับและตัวระบุตัวตนที่อยู่ข้างใน pipeline เป็นตัวที่แชร์กันทั้งระบบ
@@ -282,6 +291,7 @@ class CameraRunner:
                     )
                     self._frames_since_detection = 0
                     self.detect_meter.tick()
+                    self._record_access(result)
 
                     self._last_detect_ms = result.detect_ms
                     self._last_identify_ms = result.identify_ms
@@ -299,6 +309,50 @@ class CameraRunner:
             # (รวมเวลาที่เสียไปกับการรอคิวด้วย จึงไม่ช้าซ้ำซ้อนเมื่อมีกล้องสองตัว)
             elapsed = time.monotonic() - started
             await asyncio.sleep(max(0.0, interval - elapsed))
+
+    def _record_access(self, result) -> None:
+        """บันทึกประวัติเข้า-ออกสำหรับคนที่ "จดจำได้แล้ว" ในผลตรวจรอบนี้
+
+        นับว่า "ผ่าน" เมื่อผลโหวตของ track ตัดสินแล้วว่าเป็นสมาชิกคนหนึ่ง
+        (decided_identity) ไม่ใช่ผลของเฟรมเดียว จึงไม่บันทึกมั่วจากการจำพลาดชั่วคราว
+        ทิศทางคือทิศทางของกล้องตัวนี้: IN = เข้า, OUT = ออก
+
+        ห้ามโยน exception ออกไป ไม่งั้นจะลากลูปตรวจจับของกล้องให้ล้มด้วย
+        """
+        if self.access_logger is None:
+            return
+
+        try:
+            live_ids = set()
+            for track in result.tracks:
+                live_ids.add(track.track_id)
+                identity = track.decided_identity
+                if identity is None or not identity.is_recognized or not track.is_visible:
+                    continue
+
+                key = (track.track_id, identity.student_id)
+                if key in self._logged_keys:
+                    continue
+                self._logged_keys.add(key)
+
+                self.access_logger.submit(AccessEvent(
+                    student_id=identity.student_id,
+                    first_name=identity.first_name,
+                    last_name=identity.last_name,
+                    direction=self.camera.direction,
+                    camera_id=self.camera_id,
+                    camera_name=self.camera.name,
+                    logged_at=datetime.now(timezone.utc),
+                    bbox=tuple(track.bbox),
+                    frame_size=result.source_size,
+                    confidence=identity.confidence,
+                    track_id=track.track_id,
+                ))
+
+            # track ที่หายไปแล้วไม่ต้องจำต่อ (ไม่งั้นเซ็ตโตขึ้นเรื่อย ๆ)
+            self._logged_keys = {k for k in self._logged_keys if k[0] in live_ids}
+        except Exception:  # noqa: BLE001
+            logger.exception("บันทึกประวัติเข้า-ออกของกล้อง %s ผิดพลาด", self.camera_id)
 
     # ------------------------------------------------------------------
     # ลูปส่งภาพ (เร็ว)

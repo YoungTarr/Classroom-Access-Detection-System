@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
@@ -34,6 +34,7 @@ from app.core.frame_source import (
     FrameSource,
     create_frame_sources,
 )
+from app.core.access_logger import AccessLogger
 from app.core.detect_scheduler import DetectScheduler
 from app.core.pipeline import create_pipeline
 from app.core.stream_runner import CameraRunner
@@ -179,6 +180,11 @@ async def lifespan(_: FastAPI):
     elif settings.stream.source == "rtsp":
         logger.info("ตรวจ config กล้องแล้ว ไม่พบสิ่งผิดปกติ")
 
+    # ---- ตัวบันทึกประวัติเข้า-ออก (เฟส 12) ----
+    # สร้างก่อนตัวขับสตรีม เพราะทุกกล้องส่งเหตุการณ์เข้าตัวเดียวกันนี้
+    app.state.access_logger = AccessLogger(database)
+    app.state.access_logger.start()
+
     # ---- ประตูคิวตรวจจับที่กล้องทุกตัวใช้ร่วมกัน (เฟส 8) ----
     # สร้างก่อนตัวขับสตรีม เพราะทุกตัวต้องได้ตัวเดียวกันนี้ไป
     app.state.detect_scheduler = DetectScheduler(settings.rates.detect_fps_total)
@@ -206,6 +212,7 @@ async def lifespan(_: FastAPI):
             source,
             identifier=app.state.identifier,
             scheduler=app.state.detect_scheduler,
+            access_logger=app.state.access_logger,
         )
         await runner.start()
         app.state.camera_runners[camera_id] = runner
@@ -226,6 +233,8 @@ async def lifespan(_: FastAPI):
         await runner.stop()
     for source in app.state.frame_sources.values():
         source.stop()
+    # หยุดตัวบันทึกก่อนปิดฐานข้อมูล เพื่อให้เขียนรายการที่ค้างในคิวให้เสร็จ
+    app.state.access_logger.stop()
     database.close()
     logger.info("ปิดระบบเรียบร้อย")
 
@@ -287,6 +296,8 @@ def health(response: Response) -> dict[str, Any]:
             "ready": False,
             "error": getattr(app.state, "identifier_error", None) or "ยังไม่ได้สร้าง",
         }
+
+    access_logger = getattr(app.state, "access_logger", None)
 
     sources = getattr(app.state, "frame_sources", {}) or {}
     source_status: dict[str, Any] = {
@@ -363,7 +374,7 @@ def health(response: Response) -> dict[str, Any]:
         "app": {
             "name": settings.app.name,
             "version": settings.app.version,
-            "phase": 10,
+            "phase": 12,
         },
         "config_warnings": config_warnings,
         "database": {
@@ -376,6 +387,7 @@ def health(response: Response) -> dict[str, Any]:
         "face": face_status,
         "identify": identify_status,
         "frame_source": source_status,
+        "access_log": access_logger.status() if access_logger is not None else None,
         "server_time": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -532,6 +544,47 @@ def list_members() -> dict[str, Any]:
     ]
 
     return {"total": len(members), "members": members}
+
+
+@app.get("/api/access-logs", tags=["ประวัติ"])
+def list_access_logs(
+    limit: int = Query(50, ge=1, le=500, description="จำนวนรายการสูงสุด (ใหม่สุดก่อน)"),
+    direction: str | None = Query(None, description="กรองเฉพาะ IN (เข้า) หรือ OUT (ออก)"),
+    student_id: str | None = Query(None, description="กรองเฉพาะรหัสนักศึกษาคนหนึ่ง"),
+) -> dict[str, Any]:
+    """ประวัติการเข้า-ออกห้องที่ระบบบันทึกอัตโนมัติ เรียงใหม่สุดก่อน
+
+    ชื่อ-นามสกุลคือ snapshot ณ เวลาที่บันทึก (ไม่เปลี่ยนตามการแก้ชื่อสมาชิกภายหลัง)
+    """
+    if direction is not None:
+        direction = direction.upper()
+        if direction not in ("IN", "OUT"):
+            raise HTTPException(status_code=422, detail="direction ต้องเป็น IN หรือ OUT")
+
+    try:
+        rows = database.fetch_access_logs(limit=limit, direction=direction, student_id=student_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("อ่านประวัติเข้า-ออกไม่สำเร็จ: %s", exc)
+        raise HTTPException(status_code=503, detail=f"อ่านประวัติจากฐานข้อมูลไม่ได้: {exc}") from exc
+
+    logs = [
+        {
+            "id": row["id"],
+            "student_id": row["student_id"],
+            "first_name": row["first_name"],
+            "last_name": row["last_name"],
+            "logged_at": row["logged_at"].isoformat(),
+            "direction": row["direction"],
+            "camera_id": row["camera_id"],
+            "camera_name": row["camera_name"],
+            "bbox": [row["bbox_x"], row["bbox_y"], row["bbox_w"], row["bbox_h"]],
+            "frame_size": [row["frame_width"], row["frame_height"]],
+            "confidence": row["confidence"],
+            "track_id": row["track_id"],
+        }
+        for row in rows
+    ]
+    return {"total": len(logs), "logs": logs}
 
 
 # =============================================================================

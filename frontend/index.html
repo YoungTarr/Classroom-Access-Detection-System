@@ -152,9 +152,9 @@
     </section>
 
     <!-- ===================================================================
-         การ์ดสถานะการเชื่อมต่อ
+         การ์ดสถานะการเชื่อมต่อ - ซ่อนไว้ ขึ้นเฉพาะโหมดดีบัก (class debug-only)
          =================================================================== -->
-    <section class="card">
+    <section class="card debug-only">
       <div class="card__header">
         <h2>สถานะการเชื่อมต่อ</h2>
         <button type="button" class="btn" id="btn-refresh">ตรวจสอบใหม่</button>
@@ -211,6 +211,37 @@
 
       <!-- กล่องแสดงสาเหตุเมื่อเชื่อมต่อไม่สำเร็จ - ต้องบอกสาเหตุเสมอ ไม่ปล่อยเงียบ -->
       <div class="alert alert--error" id="health-error" hidden></div>
+    </section>
+
+    <!-- ===================================================================
+         การ์ดประวัติการเข้า-ออกห้อง (เฟส 12)
+         ข้อมูลมาจากตาราง access_logs ผ่าน GET /api/access-logs
+         กล้องขาเข้าจดจำได้ -> เข้า / กล้องขาออกจดจำได้ -> ออก
+         =================================================================== -->
+    <section class="card">
+      <div class="card__header">
+        <h2>ประวัติการเข้า-ออกห้อง</h2>
+        <span class="badge" id="access-count">—</span>
+      </div>
+
+      <div class="table-wrap">
+        <table class="table" id="access-table">
+          <thead>
+            <tr>
+              <th>ลำดับ</th>
+              <th>ชื่อ-นามสกุล</th>
+              <th>วันเวลา</th>
+              <th>ทิศทาง</th>
+              <th>กล้อง</th>
+            </tr>
+          </thead>
+          <tbody id="access-tbody">
+            <tr>
+              <td colspan="5" class="table__empty">กำลังโหลดข้อมูล…</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- ===================================================================

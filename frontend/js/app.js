@@ -53,6 +53,7 @@ const API = {
   members: '/api/members',
   config: '/api/config',
   cameras: '/api/cameras',
+  accessLogs: '/api/access-logs?limit=30',
 };
 
 // ตรวจสถานะซ้ำอัตโนมัติทุก 15 วินาที เพื่อให้เห็นทันทีเมื่อ backend/DB ล่มหรือกลับมา
@@ -134,6 +135,8 @@ const el = {
   // ---- สมาชิก ----
   memberCount: byId('member-count'),
   memberTbody: byId('member-tbody'),
+  accessTbody: byId('access-tbody'),
+  accessCount: byId('access-count'),
   footerVersion: byId('footer-version'),
 };
 
@@ -1094,6 +1097,70 @@ async function loadMembers() {
 }
 
 // ===========================================================================
+// ประวัติการเข้า-ออกห้อง (เฟส 12)
+// ===========================================================================
+function renderAccessMessage(message) {
+  el.accessTbody.replaceChildren();
+  const tr = document.createElement('tr');
+  const td = document.createElement('td');
+  td.colSpan = 5;
+  td.className = 'table__empty';
+  td.textContent = message;
+  tr.appendChild(td);
+  el.accessTbody.appendChild(tr);
+}
+
+async function loadAccessLogs() {
+  try {
+    const res = await fetch(API.accessLogs, { cache: 'no-store' });
+    if (!res.ok) {
+      throw new Error('HTTP ' + res.status + ' ' + res.statusText);
+    }
+
+    const data = await res.json();
+    const logs = data.logs || [];
+
+    setText(el.accessCount, 'ล่าสุด ' + logs.length + ' รายการ');
+
+    if (logs.length === 0) {
+      renderAccessMessage('ยังไม่มีประวัติ - จะบันทึกอัตโนมัติเมื่อกล้องจดจำสมาชิกได้');
+      return;
+    }
+
+    el.accessTbody.replaceChildren();
+    logs.forEach(function (log) {
+      const tr = document.createElement('tr');
+
+      const tdNo = document.createElement('td');
+      tdNo.textContent = log.id;
+
+      const tdName = document.createElement('td');
+      tdName.textContent = log.first_name + ' ' + log.last_name + ' (' + log.student_id + ')';
+
+      const tdTime = document.createElement('td');
+      tdTime.textContent = new Date(log.logged_at).toLocaleString('th-TH', {
+        dateStyle: 'short', timeStyle: 'medium',
+      });
+
+      const tdDir = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = log.direction === 'IN' ? 'เข้า (IN)' : 'ออก (OUT)';
+      tdDir.appendChild(badge);
+
+      const tdCam = document.createElement('td');
+      tdCam.textContent = log.camera_name || ('กล้อง ' + log.camera_id);
+
+      tr.append(tdNo, tdName, tdTime, tdDir, tdCam);
+      el.accessTbody.appendChild(tr);
+    });
+  } catch (err) {
+    setText(el.accessCount, 'ผิดพลาด');
+    renderAccessMessage('โหลดประวัติไม่สำเร็จ: ' + err.message);
+  }
+}
+
+// ===========================================================================
 // วงจรหลัก
 // ===========================================================================
 async function refreshAll() {
@@ -1104,6 +1171,7 @@ async function refreshAll() {
 
   if (healthy) {
     await loadMembers();
+    await loadAccessLogs();
   } else {
     // ต่อฐานข้อมูลไม่ได้ ก็ไม่ต้องยิง /api/members ให้ error ซ้ำซ้อน
     setText(el.memberCount, null);
@@ -1180,6 +1248,8 @@ window.addEventListener('beforeunload', () => {
   await applySourceMode();
   await refreshAll();
   setInterval(refreshAll, AUTO_REFRESH_MS);
+  // ประวัติเข้า-ออกเปลี่ยนบ่อยกว่าสถานะระบบ ดึงถี่กว่า
+  setInterval(loadAccessLogs, 5000);
 
   // โหมดกล้องหลายตัว: สำรวจสถานะกล้องเป็นระยะ
   // เพื่อให้เห็นทันทีเมื่อกล้องหลุดหรือกลับมา แม้ยังไม่ได้กดดูภาพ
