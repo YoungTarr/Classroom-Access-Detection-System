@@ -80,6 +80,7 @@ const el = {
   modeCameras: byId('mode-cameras'),
   camerasStatus: byId('cameras-status'),
   btnCameras: byId('btn-cameras'),
+  btnDebug: byId('btn-debug'),
   camerasHint: byId('cameras-hint'),
   cameraGrid: byId('camera-grid'),
   camerasError: byId('cameras-error'),
@@ -438,6 +439,26 @@ async function refreshCameraInfo() {
     // (ถ้า backend ล่มจริง การ์ดสถานะด้านล่างจะฟ้องอยู่แล้ว)
   }
 }
+
+// ปุ่มสลับแสดง/ซ่อนข้อมูลเทคนิคใต้ภาพ (URL กล้อง + สถิติเฟรม) - จำค่าไว้ใน localStorage
+function setDebugView(on) {
+  document.body.classList.toggle('show-debug', on);
+  el.btnDebug.setAttribute('aria-pressed', String(on));
+  el.btnDebug.textContent = on ? 'ซ่อนข้อมูลเทคนิค' : 'แสดงข้อมูลเทคนิค';
+  try {
+    localStorage.setItem('cads.showDebug', on ? '1' : '0');
+  } catch (err) { /* ไม่มี localStorage ก็แค่จำค่าไม่ได้ */ }
+}
+
+let savedDebug = false;
+try {
+  savedDebug = localStorage.getItem('cads.showDebug') === '1';
+} catch (err) { /* ใช้ค่าเริ่มต้น */ }
+setDebugView(savedDebug);
+
+el.btnDebug.addEventListener('click', () => {
+  setDebugView(!document.body.classList.contains('show-debug'));
+});
 
 el.btnCameras.addEventListener('click', () => {
   if (camerasRunning) {
