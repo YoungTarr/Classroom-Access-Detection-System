@@ -18,26 +18,36 @@ FROM python:3.11-slim-bookworm
 #
 # ถ้า Pi ยังช้าอยู่ ให้เปลี่ยนชุดตรวจจับเป็น buffalo_s ด้วย:
 #   docker compose build --build-arg FACE_MODEL_PACK=buffalo_s backend
+#
+# ARG สองตัวนี้ประกาศไว้ "ก่อนขั้นดาวน์โหลดโมเดล" ด้านล่าง ไม่ใช่ที่หัวไฟล์ (โดยตั้งใจ)
+# เพราะ Docker จะทิ้ง cache ของทุกขั้น RUN ที่อยู่หลัง ARG เมื่อค่าเปลี่ยน
+# ถ้าประกาศไว้บนสุด แค่สลับ buffalo_l -> buffalo_s ก็ต้องลง apt และ pip ใหม่หมด
+# ซึ่งบน Pi ที่เน็ตช้าใช้เวลาเป็นชั่วโมง
 # ---------------------------------------------------------------------------
-ARG FACE_MODEL_PACK=buffalo_l
-ARG FACE_REC_PACK=buffalo_s
 
 # PYTHONDONTWRITEBYTECODE : ไม่ต้องสร้างไฟล์ .pyc รกใน volume ที่ mount มาจาก host
 # PYTHONUNBUFFERED        : ให้ log ออกทันที ไม่ค้างใน buffer (สำคัญตอนดู docker logs)
 # FACE_MODELS_DIR         : ที่เก็บโมเดลในตัว image (โหลดมาแล้วตอน build)
+# PIP_*                   : ให้ pip ทนเน็ตที่หลุดบ่อย (เจอจริงตอน build บน Pi)
+#                           รอนานขึ้น / ลองใหม่หลายครั้ง / โหลดต่อจากที่ค้างแทนเริ่มใหม่
+#                           (pip รุ่นเก่าที่ไม่รู้จัก RESUME_RETRIES จะข้ามค่านี้ไปเอง)
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     TZ=Asia/Bangkok \
-    FACE_MODELS_DIR=/models/models
+    FACE_MODELS_DIR=/models/models \
+    PIP_DEFAULT_TIMEOUT=60 \
+    PIP_RETRIES=10 \
+    PIP_RESUME_RETRIES=20
 
 WORKDIR /app
 
 # curl/unzip  : ใช้ดาวน์โหลดและแตกไฟล์โมเดลตอน build
 # libgl1      : opencv-python ต้องการ (insightface บังคับใช้ตัวที่ไม่ใช่ headless)
 # libglib2.0-0: dependency ของ opencv เช่นกัน
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+# Acquire::Retries : ให้ apt ลองโหลดใหม่เองเมื่อเน็ตหลุด แทนที่จะล้มทั้ง build
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         curl \
         unzip \
         tzdata \
@@ -47,9 +57,18 @@ RUN apt-get update \
 
 # คัดลอก requirements ก่อนโค้ด เพื่อให้ Docker cache ชั้นติดตั้ง library ไว้
 # แก้โค้ดแล้ว build ใหม่จะไม่ต้องลง library ซ้ำ (insightface ลงนานมาก)
+#
+# --mount=type=cache : เก็บไฟล์ที่ pip โหลดมาแล้วไว้นอก image
+# ถ้า build ล้มกลางทาง (เช่นเน็ต Pi หลุด) รอบถัดไปไม่ต้องโหลดไฟล์ที่ได้แล้วซ้ำ
+# cache นี้ไม่ถูกรวมเข้าไปใน image จึงไม่ทำให้ image ใหญ่ขึ้น
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip \
+    && pip install -r requirements.txt
+
+# ARG ของชุดโมเดล - ดูเหตุผลที่ต้องอยู่ตรงนี้ในคอมเมนต์หัวไฟล์
+ARG FACE_MODEL_PACK=buffalo_l
+ARG FACE_REC_PACK=buffalo_s
 
 # ---------------------------------------------------------------------------
 # ดาวน์โหลดโมเดลตั้งแต่ตอน build image
@@ -74,7 +93,7 @@ RUN set -eux; \
         dest="/models/models/$pack"; \
         if [ -d "$dest" ]; then return 0; fi; \
         mkdir -p "$dest"; \
-        curl -fsSL -o /tmp/pack.zip \
+        curl -fsSL --retry 10 --retry-all-errors --retry-delay 5 -o /tmp/pack.zip \
           "https://github.com/deepinsight/insightface/releases/download/model-zoo/${pack}.zip"; \
         unzip -q /tmp/pack.zip -d "$dest"; \
         rm /tmp/pack.zip; \
