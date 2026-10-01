@@ -324,7 +324,15 @@ class CameraRunner:
         # (aliasing) ทำให้พลาดเฟรมแล้วต้องรออีกรอบ ได้จริงเหลือครึ่งเดียว
         poll_interval = interval / 4.0
 
+        target_width = settings.stream.target_width
+
         def encode(image) -> bytes | None:
+            # ย่อภาพก่อนเข้ารหัส (STREAM_TARGET_WIDTH) ภาพ 1080p เต็มขนาดเข้ารหัสช้าและหนักเครือข่าย
+            # ส่วนกรอบตรวจจับยังตรงเพราะหน้าเว็บคำนวณจาก source_size ไม่ใช่ขนาดภาพที่ส่ง
+            height, width = image.shape[:2]
+            if target_width > 0 and width > target_width:
+                new_height = round(height * target_width / width)
+                image = cv2.resize(image, (target_width, new_height), interpolation=cv2.INTER_AREA)
             ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
             return buffer.tobytes() if ok else None
 

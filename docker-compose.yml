@@ -77,6 +77,9 @@ services:
         FACE_REC_PACK: ${FACE_REC_PACK:-buffalo_s}
     container_name: cads-backend
     restart: unless-stopped
+    # process อ่านกล้อง (เฟส 11) ส่งเฟรมให้ backend ผ่านไฟล์ใน /dev/shm
+    # ค่าเริ่มต้นของ Docker คือ 64MB ซึ่งไม่พอสำหรับกล้องหลายตัว (ช่องเฟรมละ ~11MB x 3 ช่อง ต่อกล้อง)
+    shm_size: "256mb"
     env_file:
       - .env
     environment:

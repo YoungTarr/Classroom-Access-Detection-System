@@ -17,8 +17,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -28,7 +32,22 @@ import cv2
 import numpy as np
 
 from app.config import settings
-from app.core.rate_meter import RateMeter
+from app.core.capture_worker import (
+    H_CONNECT_ATTEMPTS,
+    H_CONNECTED,
+    H_FRAME_ID,
+    H_HEIGHT,
+    H_LAST_FRAME_AT,
+    H_READ_FPS,
+    H_RECEIVED_AT,
+    H_RECONNECTS,
+    H_WIDTH,
+    HEADER_FIELDS,
+    NUM_SLOTS,
+    SLOT_BYTES,
+    SharedHeader,
+    read_header,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,316 +292,226 @@ class NotInstalledFrameSource(FrameSource):
 
 
 class RTSPFrameSource(FrameSource):
-    """อ่านภาพจากกล้อง IP ผ่าน RTSP ด้วย thread ของตัวเอง (เฟส 6)
+    """อ่านภาพจากกล้อง IP ผ่าน RTSP โดยให้ "process แยก" เป็นคนอ่าน (เฟส 6, ย้ายเป็น process ในเฟส 11)
 
     ============================================================================
-    ทำไมต้องมี thread แยกที่อ่านทิ้งตลอดเวลา
+    ทำไมต้องอ่านทิ้งตลอดเวลา และเก็บแค่เฟรมล่าสุด
     ============================================================================
 
     กล้องส่งภาพมาเรื่อย ๆ ตามอัตราของมัน (เช่น 15 fps) ไม่สนว่าเราจะประมวลผลทัน
-    ภาพที่ยังไม่ได้อ่านจะกองอยู่ในบัฟเฟอร์ของ FFmpeg
+    ถ้าเราอ่านช้ากว่าที่กล้องส่ง ภาพที่ได้จะเป็น "ภาพเก่าที่ค้างในคิวของ FFmpeg"
+    และช้ากว่าความจริงเรื่อย ๆ จึงต้องอ่านให้เร็วที่สุดแล้วทิ้งของเก่า เก็บเฟรมล่าสุดเฟรมเดียว
+    (cv2.CAP_PROP_BUFFERSIZE ใช้ไม่ได้กับ backend FFMPEG)
 
-    ถ้าเราอ่านช้ากว่าที่กล้องส่ง (ซึ่งเกิดแน่นอน เพราะ AI ใช้เวลา ~100 ms ต่อเฟรม
-    แต่กล้องส่งทุก 66 ms) ทุกครั้งที่เรียก read() จะได้ "ภาพเก่าที่ค้างในคิว"
-    ไม่ใช่ภาพปัจจุบัน และคิวจะยาวขึ้นเรื่อย ๆ
+    ============================================================================
+    ทำไมต้องเป็น process แยก ไม่ใช่ thread (เฟส 11)
+    ============================================================================
 
-    อาการที่เห็นคือ ตอนเริ่มภาพช้ากว่าจริง 1 วินาที ผ่านไป 10 นาทีช้ากว่าจริงเป็นนาที
-    ซึ่งใช้งานไม่ได้เลยสำหรับระบบตรวจจับคนเข้า-ออก
+    แบบ thread อยู่ใน process เดียวกับงานตรวจจับใบหน้า ทั้งสองแย่งคิว GIL กัน
+    กล้องส่ง 15 fps แต่อ่านได้จริงแค่ 4-8 fps ทั้งที่ CPU ว่าง (สคริปต์แยกดึงกล้องตัวเดียวกัน
+    ได้ 17 fps ในขณะที่ระบบทำงานเต็มที่) ตอนนี้ capture_worker.py เป็นคนอ่านกล้อง
+    ใน process ของมันเอง แล้วเขียนเฟรมลง memory-mapped file ใน /dev/shm
+    คลาสนี้ทำแค่ "หยิบเฟรมล่าสุดจากไฟล์นั้น" ซึ่งเบามาก
 
-    วิธีแก้คือให้ thread นี้ "อ่านให้เร็วที่สุดเท่าที่กล้องส่งมา" แล้วทิ้งของเก่า
-    เก็บแค่เฟรมล่าสุดเฟรมเดียว ส่วน pipeline มาหยิบเฟรมล่าสุดไปใช้เมื่อพร้อม
-
-    หมายเหตุ: cv2.CAP_PROP_BUFFERSIZE ใช้แก้ปัญหานี้ไม่ได้กับ backend FFMPEG
-    (ตั้งได้แต่ไม่มีผล) จึงต้องใช้วิธี thread อ่านทิ้งเท่านั้น
+    interface ภายนอกเหมือนเดิมทุกอย่าง (start/stop/read/is_alive/status)
 
     ============================================================================
     กล้องแต่ละตัวเป็นอิสระต่อกันโดยสิ้นเชิง (เฟส 8)
     ============================================================================
 
-    หนึ่ง instance ของคลาสนี้ = กล้องหนึ่งตัว และมีของเป็นของตัวเองครบทุกอย่าง:
-        thread อ่านเฟรม / watchdog / ตัวนับ reconnect / สถิติ / เฟรมล่าสุด
-
-    ผลที่ตั้งใจให้เกิด: ถอดปลั๊กกล้องตัวหนึ่ง thread ของตัวนั้นจะวนต่อใหม่ของมันเอง
-    ส่วนอีกตัวไม่รู้เรื่องด้วยเลยและทำงานต่อได้ตามปกติ
-
-    สิ่งที่ห้ามทำเด็ดขาดในคลาสนี้คือใส่ state ที่ใช้ร่วมกันระหว่างกล้อง
-    (เช่นตัวแปรระดับโมดูล หรือ class attribute ที่เขียนค่าได้)
-    เพราะกล้องที่มีปัญหาจะลากอีกตัวล้มตามไปด้วยทันที
-    ส่วนของที่ "ต้องใช้ร่วมกันจริง ๆ" คือโมเดล AI ซึ่งอยู่คนละไฟล์ (face/, identify/)
+    หนึ่ง instance = กล้องหนึ่งตัว = worker process หนึ่งตัว + ไฟล์ shared memory หนึ่งไฟล์
+    ห้ามมี state ที่ใช้ร่วมกันระหว่างกล้อง ถอดปลั๊กกล้องหนึ่งตัวต้องไม่กระทบอีกตัว
     """
+
+    # ถ้า worker ตายเอง จะสตาร์ทใหม่ให้ แต่ไม่ถี่เกินครั้งละกี่วินาที
+    RESTART_COOLDOWN = 3.0
 
     def __init__(self, camera) -> None:  # camera: CameraSettings
         self.camera = camera
         self.name = f"rtsp:{camera.id}"
 
         self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._shared: SharedHeader | None = None
+        self._shm_path: str | None = None
+        self._stopping = False
+        self._last_spawn_at = 0.0
+
+        # เฟรมล่าสุดที่คัดลอกออกมาแล้ว - read() ถูกเรียกถี่มาก (หลายสิบครั้งต่อวินาที)
+        # ต้องคัดลอกภาพ (~6 MB) เฉพาะตอนมีเฟรมใหม่จริง ๆ
         self._latest: Frame | None = None
-        self._frame_counter = 0
-
-        self._thread: threading.Thread | None = None
-        self._stop_event = threading.Event()
-
-        # ---- สถานะสำหรับรายงานบนหน้าเว็บ (แยกกันคนละชุดต่อกล้อง) ----
-        self._connected = False
-        self._last_frame_at: float = 0.0
-        self._last_error: str | None = None
-        self._received_count = 0
-
-        # ตัวนับสองตัวนี้วัดคนละเรื่องกัน ต้องแยกกันไว้:
-        #   reconnects        ต่อติดแล้ว "หลุดทีหลัง" กี่ครั้ง (สตรีมไม่เสถียร)
-        #   connect_attempts  พยายามเปิดสตรีม "ไม่สำเร็จ" ไปกี่ครั้ง (ยังต่อไม่ติดเลย)
-        # เดิมมีแค่ตัวแรก กล้องที่ต่อไม่ติดตั้งแต่ต้นเลยขึ้นว่า "ต่อใหม่ 0 ครั้ง" ตลอด
-        # ทั้งที่ระบบวนลองอยู่จริง ทำให้เข้าใจผิดว่าระบบไม่ได้พยายามต่อใหม่
-        self._reconnect_count = 0
-        self._connect_attempts = 0
-
-        # ความละเอียดที่กล้องตัวนี้ส่งมาจริง - ห้ามเดา เพราะกล้องคนละรุ่น
-        # หรือคนละ path (/stream1 กับ /stream2) ให้ขนาดไม่เท่ากัน
-        self._frame_size: tuple[int, int] | None = None
-
-        # อัตราที่ "อ่านเฟรมจากกล้องตัวนี้ได้จริง" (เฟส 8: แยกรายกล้อง)
-        # วัดที่ต้นทางเลย จะได้แยกออกว่าภาพกระตุกเพราะกล้อง/เครือข่าย
-        # หรือเพราะ AI ตามไม่ทัน ซึ่งเป็นคนละปัญหาและแก้คนละวิธี
-        self._read_meter = RateMeter()
 
     # ------------------------------------------------------------------
     # วงจรชีวิต
     # ------------------------------------------------------------------
     def start(self) -> None:
-        if self._thread is not None:
+        if self._proc is not None:
             return
 
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run,
-            name=f"rtsp-{self.camera.id}",
-            daemon=True,
+        self._stopping = False
+
+        # ชื่อไฟล์มี pid กันชนกันถ้ามีหลาย backend บนเครื่องเดียว
+        shm_dir = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
+        self._shm_path = os.path.join(shm_dir, f"cads_cam{self.camera.id}_{os.getpid()}.shm")
+        self._shared = SharedHeader(self._shm_path, create=True)
+
+        self._spawn()
+
+    def _spawn(self) -> None:
+        cfg = {
+            "camera_id": self.camera.id,
+            "url": self.camera.rtsp_url,
+            "safe_url": self.camera.safe_url(),
+            "password": self.camera.password,
+            "shm_path": self._shm_path,
+            "capture_fps": settings.rates.capture_fps,
+            "ffmpeg_options": settings.rtsp.ffmpeg_options,
+            "watchdog_timeout": settings.rtsp.watchdog_timeout,
+            "reconnect_initial": settings.rtsp.reconnect_initial_delay,
+            "reconnect_max": settings.rtsp.reconnect_max_delay,
+        }
+
+        # ส่งค่าผ่าน env ไม่ใช่ argv เพราะ URL มีรหัสผ่านกล้อง (argv เห็นได้ด้วย ps)
+        env = dict(os.environ)
+        env["CADS_CAPTURE_CONFIG"] = json.dumps(cfg)
+
+        self._proc = subprocess.Popen(
+            [sys.executable, "-m", "app.core.capture_worker"],
+            env=env,
         )
-        self._thread.start()
+        self._last_spawn_at = time.monotonic()
         logger.info(
-            "เริ่ม thread อ่านกล้อง %s (%s)",
-            self.camera.id,
-            self.camera.safe_url(),  # ปิดบังรหัสผ่านไว้แล้ว
+            "เริ่ม process อ่านกล้อง %s (pid %d, %s)",
+            self.camera.id, self._proc.pid, self.camera.safe_url(),
         )
 
     def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread is not None:
-            # รอไม่นาน ถ้า read() ยังค้างอยู่ก็ปล่อยไป เพราะเป็น daemon thread
-            self._thread.join(timeout=3.0)
-            self._thread = None
-        self._connected = False
-        logger.info("หยุด thread อ่านกล้อง %s", self.camera.id)
+        self._stopping = True
+        proc, self._proc = self._proc, None
+
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                # FFmpeg อาจค้างอยู่ใน grab() ไม่ตอบสัญญาณ - ฆ่าเลย
+                proc.kill()
+                proc.wait(timeout=3.0)
+
+        shared, self._shared = self._shared, None
+        if shared is not None:
+            shared.close()
+        if self._shm_path:
+            try:
+                os.unlink(self._shm_path)
+            except OSError:
+                pass
+            self._shm_path = None
+
+        with self._lock:
+            self._latest = None
+        logger.info("หยุด process อ่านกล้อง %s", self.camera.id)
+
+    def _supervise(self) -> None:
+        """worker ตายเองโดยไม่ได้สั่ง (เช่นถูก OOM kill) -> สตาร์ทใหม่ให้"""
+        proc = self._proc
+        if proc is None or self._stopping or proc.poll() is None:
+            return
+        if time.monotonic() - self._last_spawn_at < self.RESTART_COOLDOWN:
+            return
+        logger.error(
+            "process อ่านกล้อง %s ตายเอง (exit code %s) กำลังสตาร์ทใหม่",
+            self.camera.id, proc.returncode,
+        )
+        self._spawn()
+
+    # ------------------------------------------------------------------
+    # สถานะ
+    # ------------------------------------------------------------------
+    def _header(self) -> tuple[np.ndarray, str | None] | None:
+        shared = self._shared
+        if shared is None:
+            return None
+        info = read_header(shared)
+        return info["values"], info["error"]
 
     def is_alive(self) -> bool:
         """ยังได้รับภาพจากกล้องอยู่จริงหรือไม่
 
-        ไม่ได้ดูแค่ว่า thread ยังทำงานอยู่ไหม แต่ดูว่า "เพิ่งได้ภาพใหม่มาหรือเปล่า"
-        เพราะ RTSP ค้างได้โดยที่ thread ยังวนอยู่ปกติ
+        ดูว่า "เพิ่งได้ภาพใหม่มาหรือเปล่า" ไม่ใช่แค่ว่า process ยังอยู่ เพราะ RTSP ค้างได้
+        โดยที่ process ยังหมุนปกติ
         """
-        if not self._connected:
+        self._supervise()
+        header = self._header()
+        if header is None or self._proc is None or self._proc.poll() is not None:
             return False
-        return (time.monotonic() - self._last_frame_at) <= settings.rtsp.watchdog_timeout
+        values, _ = header
+        if not values[H_CONNECTED]:
+            return False
+        return bool((time.monotonic() - values[H_LAST_FRAME_AT]) <= settings.rtsp.watchdog_timeout)
 
     # ------------------------------------------------------------------
     # อ่านออก
     # ------------------------------------------------------------------
     def read(self) -> Frame | None:
+        self._supervise()
+
+        shared = self._shared
+        if shared is None:
+            return None
+
         with self._lock:
-            return self._latest
+            cached = self._latest
 
-    # ------------------------------------------------------------------
-    # thread หลัก
-    # ------------------------------------------------------------------
-    def _run(self) -> None:
-        delay = settings.rtsp.reconnect_initial_delay
+            for _ in range(3):
+                values = read_header(shared)["values"]
+                frame_id = int(values[H_FRAME_ID])
+                if frame_id == 0:
+                    return cached
+                if cached is not None and cached.frame_id == frame_id:
+                    return cached
 
-        while not self._stop_event.is_set():
-            capture = self._open_capture()
+                width, height = int(values[H_WIDTH]), int(values[H_HEIGHT])
+                nbytes = width * height * 3
+                if nbytes <= 0 or nbytes > SLOT_BYTES:
+                    return cached
 
-            if capture is None:
-                # ต่อไม่ติด - รอแล้วลองใหม่ โดยเพิ่มเวลารอเป็นเท่าตัว
-                # (1, 2, 4, 8, ... จนถึงเพดาน) เพื่อไม่ให้ยิงถี่ ๆ ใส่กล้องที่ยังไม่พร้อม
-                # ผลพลอยได้คือ log ก็ถี่ตามไปด้วยไม่เกินครั้งละเพดาน (ค่าเริ่มต้น 30 วินาที)
-                self._connect_attempts += 1
-                logger.warning(
-                    "กล้อง %s ต่อไม่ได้ (ครั้งที่ %d) จะลองใหม่ในอีก %.0f วินาที (%s)",
-                    self.camera.id, self._connect_attempts, delay, self._last_error,
-                )
-                if self._stop_event.wait(delay):
-                    break
-                delay = min(delay * 2, settings.rtsp.reconnect_max_delay)
-                continue
+                slot = shared.slot(frame_id % NUM_SLOTS)
+                image = slot[:nbytes].reshape(height, width, 3).copy()
 
-            # ต่อติดแล้ว รีเซ็ตเวลารอกลับไปค่าเริ่มต้น
-            delay = settings.rtsp.reconnect_initial_delay
-            self._read_loop(capture)
+                # worker ใช้ 3 ช่องวนกัน ช่องที่เราเพิ่งคัดลอกจะถูกเขียนทับเมื่อมีเฟรมใหม่
+                # ถึงสองเฟรมซ้อน ถ้าเป็นแบบนั้นภาพที่ได้อาจฉีก ทิ้งแล้วอ่านใหม่
+                if int(shared.fields[H_FRAME_ID]) - frame_id > NUM_SLOTS - 2:
+                    continue
 
-            # หลุดออกจาก _read_loop แปลว่าสตรีมมีปัญหา ต้องปิดแล้วต่อใหม่
-            capture.release()
-            self._connected = False
-
-            # ล้างค่าอัตราที่วัดไว้ ไม่งั้นหน้าเว็บจะยังโชว์ fps ของตอนที่ยังต่อติดอยู่
-            # ค้างอยู่อีกหลายวินาที ทั้งที่กล้องหลุดไปแล้ว
-            self._read_meter.reset()
-
-            if not self._stop_event.is_set():
-                self._reconnect_count += 1
-                logger.warning(
-                    "กล้อง %s สตรีมหลุด (%s) กำลังต่อใหม่ครั้งที่ %d",
-                    self.camera.id, self._last_error, self._reconnect_count,
-                )
-
-    def _open_capture(self):
-        """เปิดการเชื่อมต่อ RTSP
-
-        **สำคัญมาก** ต้องตั้ง OPENCV_FFMPEG_CAPTURE_OPTIONS ก่อนสร้าง VideoCapture
-        เพราะ FFmpeg อ่านค่านี้ตอน "เปิดสตรีม" เท่านั้น
-        ถ้าตั้งหลังจากสร้างไปแล้ว จะไม่มีผลใด ๆ และหาสาเหตุยากมาก
-        เพราะภาพจะแตกเป็นบล็อกโดยไม่มี error อะไรออกมาเลย
-        """
-        import cv2
-
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = settings.rtsp.ffmpeg_options
-
-        try:
-            capture = cv2.VideoCapture(self.camera.rtsp_url, cv2.CAP_FFMPEG)
-        except Exception as exc:  # noqa: BLE001
-            # ข้อความ error ของ OpenCV อาจมี URL เต็มติดมาด้วย ต้องปิดบังก่อนเก็บ
-            # เพราะค่านี้ถูกส่งออกไปทั้งใน log และใน /api/health
-            self._last_error = f"สร้าง VideoCapture ไม่สำเร็จ: {self._scrub(str(exc))}"
-            return None
-
-        if not capture.isOpened():
-            capture.release()
-            self._last_error = (
-                f"เปิดสตรีมไม่ได้ที่ {self.camera.safe_url()} - "
-                "ตรวจว่ากล้องเปิดอยู่ ต่อเน็ตเวิร์กเดียวกัน "
-                "และบัญชีผู้ใช้/รหัสผ่านถูกต้อง"
-            )
-            return None
-
-        self._last_error = None
-        self._connected = True
-        self._last_frame_at = time.monotonic()
-
-        logger.info(
-            "ต่อกล้อง %s สำเร็จ (%s) ความละเอียด %dx%d",
-            self.camera.id,
-            self.camera.safe_url(),
-            int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-        )
-        return capture
-
-    def _read_loop(self, capture) -> None:
-        """วนอ่านเฟรมให้เร็วที่สุด เก็บแค่เฟรมล่าสุด
-
-        ออกจากลูปเมื่อสตรีมมีปัญหา เพื่อให้ตัวเรียกไปต่อใหม่
-        """
-        timeout = settings.rtsp.watchdog_timeout
-        last_good_at = time.monotonic()
-
-        # ช่วงห่างขั้นต่ำระหว่างเฟรมที่เราจะ "เอามาใช้จริง" (เฟส 7)
-        # ---- ตัวคุมอัตราแบบ token bucket ----
-        #
-        # ทำไมไม่ใช้วิธีง่าย ๆ อย่าง "ห่างจากเฟรมก่อนหน้าครบ 1/fps หรือยัง":
-        # เพราะเฟรมจากกล้องมาไม่สม่ำเสมอ แต่มาเป็น "ช่อ" (burst)
-        # เช่นสองเฟรมมาห่างกัน 20 ms แล้วเว้นไป 130 ms
-        # วิธีวัดระยะห่างจะทิ้งเฟรมที่สองของทุกช่อ ทั้งที่อัตราเฉลี่ยยังไม่เกินที่ตั้งไว้เลย
-        # วัดจริงแล้วกล้องส่งได้ 13 fps แต่เหลือถึงเราแค่ 9.6
-        #
-        # token bucket แก้ตรงนี้พอดี: เติม token ตามเวลาที่ผ่านไป
-        # เฟรมหนึ่งใช้หนึ่ง token ถ้ามี token เหลือก็เก็บเฟรมได้แม้จะมาติดกัน
-        # ส่วนเพดานของถัง (burst_size) กันไม่ให้สะสม token ไว้นานจนปล่อยรัวผิดปกติ
-        capture_fps = max(1, settings.rates.capture_fps)
-        burst_size = 2.0
-        tokens = burst_size
-        last_token_at = time.monotonic()
-
-        while not self._stop_event.is_set():
-            # ---- แยกการอ่านออกเป็นสองขั้น: grab แล้วค่อย retrieve ----
-            #
-            # grab()     = ดึงแพ็กเก็ตถัดไปออกจากสตรีม (ต้องทำทุกเฟรมเสมอ
-            #              ไม่งั้นข้อมูลจะกองค้างอยู่ในบัฟเฟอร์แล้วภาพช้ากว่าจริง)
-            # retrieve() = แปลงเป็นภาพ BGR ที่ใช้งานได้ ซึ่งเป็นขั้นที่กิน CPU
-            #
-            # เฟรมที่เกินอัตรา CAPTURE_FPS จึงถูก grab ทิ้งโดยไม่ต้อง retrieve
-            # ประหยัด CPU ได้จริงเพราะไม่ต้องแปลงสีภาพที่ยังไงก็ไม่ได้ใช้
-            ok = capture.grab()
-            now = time.monotonic()
-
-            # ---- watchdog: ไม่ได้เฟรมใหม่นานเกินไป ----
-            #
-            # นี่คือจุดที่สำคัญที่สุดของการ reconnect
-            # **ห้ามเช็คแค่ว่า read() คืน False** เพราะ RTSP ค้างได้แบบไม่มี error เลย
-            # อาการที่เจอจริงคือ read() บล็อกนานมากแล้วค่อยคืนเฟรมเก่า ๆ กลับมา
-            # หรือคืน True เรื่อย ๆ แต่ภาพไม่ขยับ
-            # การวัดจาก "เวลาที่ผ่านไปตั้งแต่ได้เฟรมดีล่าสุด" จับได้ทุกกรณี
-            if now - last_good_at > timeout:
-                self._last_error = (
-                    f"ไม่ได้เฟรมใหม่เกิน {timeout:.0f} วินาที "
-                    "(กล้องอาจถูกถอดปลั๊ก หรือหลุดจากเครือข่าย)"
-                )
-                return
-
-            if not ok:
-                # อ่านพลาดครั้งสองครั้งเป็นเรื่องปกติของเครือข่าย ยังไม่ต้องต่อใหม่
-                # ปล่อยให้ watchdog ด้านบนเป็นคนตัดสินว่าพอแล้ว
-                # หน่วงสั้น ๆ ไม่ให้วนกินซีพียูเปล่า ๆ ตอนกล้องมีปัญหา
-                if self._stop_event.wait(0.05):
-                    return
-                continue
-
-            # grab สำเร็จ = สตรีมยังมีชีวิตอยู่ นับเป็นเฟรมดีสำหรับ watchdog
-            last_good_at = now
-
-            # ---- เติม token ตามเวลาที่ผ่านไป แล้วดูว่ามีพอจะเก็บเฟรมนี้ไหม ----
-            tokens = min(burst_size, tokens + (now - last_token_at) * capture_fps)
-            last_token_at = now
-
-            # token ไม่พอ = อัตราเฉลี่ยเกินที่ตั้งไว้แล้ว ทิ้งเฟรมนี้ไปเลย
-            # ไม่ต้องเสียแรงแปลงเป็นภาพ BGR ซึ่งเป็นขั้นที่กิน CPU
-            if tokens < 1.0:
-                continue
-
-            ok, image = capture.retrieve()
-            if not ok or image is None:
-                continue
-
-            tokens -= 1.0
-
-            with self._lock:
-                self._frame_counter += 1
-                # ทับเฟรมเดิมทันที ไม่สะสมเป็นคิว
                 self._latest = Frame(
-                    frame_id=self._frame_counter,
+                    frame_id=frame_id,
                     image=image,
-                    received_at=now,
+                    received_at=float(values[H_RECEIVED_AT]),
                 )
-                self._received_count += 1
-                self._frame_size = (image.shape[1], image.shape[0])
+                return self._latest
 
-            self._last_frame_at = now
-            self._read_meter.tick()
+            return cached
 
-    # ------------------------------------------------------------------
-    # สถานะ
-    # ------------------------------------------------------------------
     def status(self) -> dict:
         """ข้อมูลสำหรับ /api/health และหน้าเว็บ
 
         ทุกค่าในนี้เป็นของ "กล้องตัวนี้ตัวเดียว" ห้ามมีค่าที่รวมกับกล้องตัวอื่น
-        เพราะจุดประสงค์คือให้ดูออกว่ากล้องตัวไหนมีปัญหา
         """
-        age = (
-            time.monotonic() - self._last_frame_at
-            if self._last_frame_at else None
-        )
-        with self._lock:
-            frame_size = self._frame_size
-
         alive = self.is_alive()
+        header = self._header()
+
+        if header is None:
+            values, error = np.zeros(HEADER_FIELDS), None
+        else:
+            values, error = header
+
+        if self._proc is not None and self._proc.poll() is not None and not error:
+            error = f"process อ่านกล้องหยุดทำงาน (exit code {self._proc.returncode})"
+
+        last_frame_at = values[H_LAST_FRAME_AT]
+        age = (time.monotonic() - last_frame_at) if last_frame_at else None
+        width, height = int(values[H_WIDTH]), int(values[H_HEIGHT])
 
         return {
             "id": self.camera.id,
@@ -593,27 +522,16 @@ class RTSPFrameSource(FrameSource):
             "state": CAMERA_STATE_CONNECTED if alive else CAMERA_STATE_CONNECTING,
             "installed": True,
             "host_env": f"{self.camera.env_prefix}HOST",
-            "connected": self._connected,
+            "connected": bool(values[H_CONNECTED]),
             "alive": alive,
-            "received_frames": self._received_count,
-            "reconnects": self._reconnect_count,
-            "connect_attempts": self._connect_attempts,
-            "read_fps": round(self._read_meter.fps, 1),
-            "resolution": list(frame_size) if frame_size else None,
+            "received_frames": int(values[H_FRAME_ID]),
+            "reconnects": int(values[H_RECONNECTS]),
+            "connect_attempts": int(values[H_CONNECT_ATTEMPTS]),
+            "read_fps": round(float(values[H_READ_FPS]), 1),
+            "resolution": [width, height] if width and height else None,
             "last_frame_age_s": round(age, 1) if age is not None else None,
-            "error": self._last_error,
+            "error": error,
         }
-
-    def _scrub(self, text: str) -> str:
-        """ลบรหัสผ่านกล้องออกจากข้อความใด ๆ ก่อนเอาไปแสดงหรือเขียน log
-
-        ใช้กับข้อความที่มาจากไลบรารีภายนอก (OpenCV / FFmpeg) ซึ่งเราคุมไม่ได้ว่า
-        จะแปะ URL เต็มมาด้วยหรือเปล่า ปิดทั้ง URL เต็มและตัวรหัสผ่านเดี่ยว ๆ
-        """
-        text = text.replace(self.camera.rtsp_url, self.camera.safe_url())
-        if self.camera.password:
-            text = text.replace(self.camera.password, "***")
-        return text
 
 
 def create_frame_sources(source_name: str) -> dict[str, FrameSource]:
