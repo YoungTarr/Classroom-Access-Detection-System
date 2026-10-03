@@ -81,7 +81,6 @@ const el = {
   modeCameras: byId('mode-cameras'),
   camerasStatus: byId('cameras-status'),
   btnCameras: byId('btn-cameras'),
-  btnDebug: byId('btn-debug'),
   camerasHint: byId('cameras-hint'),
   cameraGrid: byId('camera-grid'),
   camerasError: byId('cameras-error'),
@@ -137,6 +136,7 @@ const el = {
   memberTbody: byId('member-tbody'),
   accessTbody: byId('access-tbody'),
   accessCount: byId('access-count'),
+  btnDeleteAllLogs: byId('btn-delete-all-logs'),
   footerVersion: byId('footer-version'),
 };
 
@@ -240,7 +240,6 @@ function renderConfigWarnings(warnings, applyHint) {
   if (configWarnings.length === 0) {
     box.replaceChildren();
     box.hidden = true;
-    markWarnedPanels();
     return;
   }
 
@@ -263,14 +262,6 @@ function renderConfigWarnings(warnings, applyHint) {
 
   box.replaceChildren(title, list, hint);
   box.hidden = false;
-  markWarnedPanels();
-}
-
-/** ทำให้ URL ใต้หัวจอของกล้องที่ถูกเตือนเป็นสีเหลือง จะได้เห็นว่าจอไหนเกี่ยว */
-function markWarnedPanels() {
-  const warned = new Set();
-  configWarnings.forEach((w) => (w.cameras || []).forEach((id) => warned.add(String(id))));
-  panels.forEach((panel, id) => panel.setConfigWarned(warned.has(String(id))));
 }
 
 /**
@@ -317,7 +308,6 @@ async function buildCameraPanels() {
     panels.set(cam.id, panel);
   });
 
-  markWarnedPanels();
   updateSummary();
 }
 
@@ -443,26 +433,6 @@ async function refreshCameraInfo() {
   }
 }
 
-// ปุ่มสลับแสดง/ซ่อนข้อมูลเทคนิคใต้ภาพ (URL กล้อง + สถิติเฟรม) - จำค่าไว้ใน localStorage
-function setDebugView(on) {
-  document.body.classList.toggle('show-debug', on);
-  el.btnDebug.setAttribute('aria-pressed', String(on));
-  el.btnDebug.textContent = on ? 'ซ่อนข้อมูลเทคนิค' : 'แสดงข้อมูลเทคนิค';
-  try {
-    localStorage.setItem('cads.showDebug', on ? '1' : '0');
-  } catch (err) { /* ไม่มี localStorage ก็แค่จำค่าไม่ได้ */ }
-}
-
-let savedDebug = false;
-try {
-  savedDebug = localStorage.getItem('cads.showDebug') === '1';
-} catch (err) { /* ใช้ค่าเริ่มต้น */ }
-setDebugView(savedDebug);
-
-el.btnDebug.addEventListener('click', () => {
-  setDebugView(!document.body.classList.contains('show-debug'));
-});
-
 el.btnCameras.addEventListener('click', () => {
   if (camerasRunning) {
     stopAllCameras();
@@ -470,12 +440,6 @@ el.btnCameras.addEventListener('click', () => {
     startAllCameras();
   }
 });
-
-// อัปเดตตัวเลขอัตราการวาดของทุกจอทุกครึ่งวินาทีพอ
-// ไม่ต้องอัปเดตทุกเฟรมให้เปลืองเปล่า
-setInterval(() => {
-  panels.forEach((panel) => panel.refreshRenderFps());
-}, 500);
 
 // ===========================================================================
 // ส่วนที่ 3: โหมดเว็บแคมเดี่ยว (เฟส 2 - ใช้ตอนไม่มีกล้อง IP เลย)
@@ -1103,7 +1067,7 @@ function renderAccessMessage(message) {
   el.accessTbody.replaceChildren();
   const tr = document.createElement('tr');
   const td = document.createElement('td');
-  td.colSpan = 5;
+  td.colSpan = 6;
   td.className = 'table__empty';
   td.textContent = message;
   tr.appendChild(td);
@@ -1151,7 +1115,19 @@ async function loadAccessLogs() {
       const tdCam = document.createElement('td');
       tdCam.textContent = log.camera_name || ('กล้อง ' + log.camera_id);
 
-      tr.append(tdNo, tdName, tdTime, tdDir, tdCam);
+      // ปุ่มลบรายการนี้
+      const tdDel = document.createElement('td');
+      const btnDel = document.createElement('button');
+      btnDel.type = 'button';
+      btnDel.className = 'btn btn--danger btn--small';
+      btnDel.textContent = 'ลบ';
+      btnDel.addEventListener('click', function () {
+        deleteAccessLogs(log.id, 'ลบประวัติลำดับที่ ' + log.id + ' (' + log.first_name + ' ' +
+          log.last_name + ') ใช่ไหม?\nลบแล้วกู้คืนไม่ได้');
+      });
+      tdDel.appendChild(btnDel);
+
+      tr.append(tdNo, tdName, tdTime, tdDir, tdCam, tdDel);
       el.accessTbody.appendChild(tr);
     });
   } catch (err) {
@@ -1159,6 +1135,30 @@ async function loadAccessLogs() {
     renderAccessMessage('โหลดประวัติไม่สำเร็จ: ' + err.message);
   }
 }
+
+/**
+ * ลบประวัติ (เฉพาะโหมดดีบัก) - logId เป็นเลขลำดับ หรือ null = ลบทั้งหมด
+ * ถามยืนยันก่อนเสมอ เพราะลบแล้วกู้คืนไม่ได้
+ */
+async function deleteAccessLogs(logId, confirmMessage) {
+  if (!window.confirm(confirmMessage)) return;
+
+  const url = logId === null ? '/api/access-logs' : '/api/access-logs/' + logId;
+  try {
+    const res = await fetch(url, { method: 'DELETE' });
+    if (!res.ok) {
+      throw new Error('HTTP ' + res.status + ' ' + res.statusText);
+    }
+  } catch (err) {
+    window.alert('ลบประวัติไม่สำเร็จ: ' + err.message);
+    return;
+  }
+  await loadAccessLogs();
+}
+
+el.btnDeleteAllLogs.addEventListener('click', function () {
+  deleteAccessLogs(null, 'ลบประวัติเข้า-ออกทั้งหมดใช่ไหม?\nลบแล้วกู้คืนไม่ได้');
+});
 
 // ===========================================================================
 // วงจรหลัก

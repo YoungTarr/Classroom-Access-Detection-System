@@ -34,7 +34,6 @@
 
       <div class="controls">
         <button type="button" class="btn btn--primary" id="btn-cameras">เริ่มดูภาพสดทุกกล้อง</button>
-        <button type="button" class="btn" id="btn-debug" aria-pressed="false">แสดงข้อมูลเทคนิค</button>
         <span class="controls__hint" id="cameras-hint"></span>
       </div>
 
@@ -221,7 +220,10 @@
     <section class="card">
       <div class="card__header">
         <h2>ประวัติการเข้า-ออกห้อง</h2>
-        <span class="badge" id="access-count">—</span>
+        <div class="card__actions">
+          <span class="badge" id="access-count">—</span>
+          <button type="button" class="btn btn--danger" id="btn-delete-all-logs">ลบประวัติทั้งหมด</button>
+        </div>
       </div>
 
       <div class="table-wrap">
@@ -233,11 +235,12 @@
               <th>วันเวลา</th>
               <th>ทิศทาง</th>
               <th>กล้อง</th>
+              <th></th>
             </tr>
           </thead>
           <tbody id="access-tbody">
             <tr>
-              <td colspan="5" class="table__empty">กำลังโหลดข้อมูล…</td>
+              <td colspan="6" class="table__empty">กำลังโหลดข้อมูล…</td>
             </tr>
           </tbody>
         </table>

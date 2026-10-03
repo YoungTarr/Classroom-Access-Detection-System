@@ -587,6 +587,35 @@ def list_access_logs(
     return {"total": len(logs), "logs": logs}
 
 
+@app.delete("/api/access-logs/{log_id}", tags=["ประวัติ"])
+def delete_access_log(log_id: int) -> dict[str, Any]:
+    """ลบประวัติหนึ่งรายการ (หน้าเว็บมีปุ่มนี้เฉพาะโหมดดีบัก) ลบแล้วกู้คืนไม่ได้"""
+    try:
+        deleted = database.delete_access_log(log_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ลบประวัติ #%d ไม่สำเร็จ: %s", log_id, exc)
+        raise HTTPException(status_code=503, detail=f"ลบประวัติไม่สำเร็จ: {exc}") from exc
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"ไม่พบประวัติลำดับที่ {log_id}")
+
+    logger.info("ลบประวัติเข้า-ออก #%d", log_id)
+    return {"deleted": 1}
+
+
+@app.delete("/api/access-logs", tags=["ประวัติ"])
+def delete_all_access_logs() -> dict[str, Any]:
+    """ลบประวัติทั้งหมด (หน้าเว็บมีปุ่มนี้เฉพาะโหมดดีบัก) ลบแล้วกู้คืนไม่ได้"""
+    try:
+        count = database.delete_all_access_logs()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ลบประวัติทั้งหมดไม่สำเร็จ: %s", exc)
+        raise HTTPException(status_code=503, detail=f"ลบประวัติไม่สำเร็จ: {exc}") from exc
+
+    logger.warning("ลบประวัติเข้า-ออกทั้งหมด %d รายการ", count)
+    return {"deleted": count}
+
+
 # =============================================================================
 # WebSocket: รับเฟรมจากเบราว์เซอร์แล้วตรวจจับใบหน้า
 # =============================================================================

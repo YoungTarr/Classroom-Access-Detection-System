@@ -183,6 +183,36 @@ class Database:
                 )
                 return int(cur.fetchone()["id"])
 
+    # หลังลบทุกครั้งให้เลขลำดับถัดไป = เลขมากสุดที่เหลืออยู่ + 1 (ว่างเปล่า = เริ่มที่ 1 ใหม่)
+    # ทำในธุรกรรมเดียวกับการลบ ผลคือ ลบทั้งหมดแล้วรายการต่อไปได้ลำดับที่ 1
+    # และลบรายการล่าสุดแล้วเลขนั้นถูกใช้ซ้ำ (ลบรายการกลางแถวจะเหลือช่องว่างตามปกติ
+    # เพราะเลขลำดับเป็นตัวอ้างอิงถาวรของรายการ ไม่ถูกเรียงเลขใหม่)
+    _RESET_SEQUENCE_SQL = """
+        SELECT setval(
+            pg_get_serial_sequence('access_logs', 'id'),
+            COALESCE((SELECT MAX(id) FROM access_logs), 0) + 1,
+            false
+        )
+    """
+
+    def delete_access_log(self, log_id: int) -> bool:
+        """ลบประวัติหนึ่งรายการ คืน True ถ้ามีรายการนั้นอยู่จริงและถูกลบแล้ว"""
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM access_logs WHERE id = %s", (log_id,))
+                deleted = cur.rowcount > 0
+                cur.execute(self._RESET_SEQUENCE_SQL)
+                return deleted
+
+    def delete_all_access_logs(self) -> int:
+        """ลบประวัติทั้งหมด คืนจำนวนรายการที่ถูกลบ และเริ่มนับลำดับที่ 1 ใหม่"""
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM access_logs")
+                count = cur.rowcount
+                cur.execute(self._RESET_SEQUENCE_SQL)
+                return count
+
     def fetch_access_logs(
         self,
         limit: int = 50,

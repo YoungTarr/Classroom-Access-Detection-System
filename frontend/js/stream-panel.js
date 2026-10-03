@@ -80,24 +80,6 @@ function describeCameraState(info) {
   return { kind: 'connecting', dot: 'pending', label: 'กำลังเชื่อมต่อ' };
 }
 
-/* รายการสถิติของจอหนึ่งจอ - ประกาศไว้ที่เดียวแล้วสร้าง DOM จากรายการนี้
-   เพิ่ม/ลด/สลับลำดับได้ที่นี่จุดเดียว ทั้งสองจอจะเหมือนกันเสมอโดยไม่ต้องแก้สองที่ */
-const PANEL_STATS = [
-  ['resolution', 'ความละเอียดกล้อง'],
-  ['sentSize', 'ขนาดที่ส่งตรวจ'],
-  ['fps', 'FPS ที่ได้รับ'],
-  ['rates', 'อ่าน / ตรวจ / ส่ง'],
-  ['latency', 'อายุเฟรม (latency)'],
-  ['process', 'เวลาตรวจจับ'],
-  ['faces', 'ใบหน้าที่เจอ'],
-  ['tracks', 'กำลังติดตาม'],
-  ['known', 'จดจำได้'],
-  ['renderFps', 'อัตราวาดกรอบ'],
-  // สองตัวเลขนี้วัดคนละเรื่อง: หลุดหลังจากต่อติดแล้ว / พยายามต่อแต่ยังไม่ติด
-  // เดิมมีแค่ตัวแรก กล้องที่ต่อไม่ติดตั้งแต่ต้นจึงขึ้น 0 ตลอดจนดูเหมือนระบบไม่พยายามต่อ
-  ['reconnects', 'หลุด / ลองต่อ'],
-];
-
 // รอเท่าไรก่อนลองต่อ WebSocket ใหม่เมื่อการเชื่อมต่อหลุดแบบไม่ได้สั่ง
 // เพิ่มเป็นเท่าตัวทุกครั้ง (หลักการเดียวกับฝั่ง backend ตอนต่อกล้องใหม่)
 const WS_RECONNECT_MIN_MS = 1000;
@@ -124,9 +106,6 @@ class StreamPanel {
 
     this.reconnectDelay = WS_RECONNECT_MIN_MS;
     this.reconnectTimer = null;
-
-    // ใช้คำนวณ fps ที่ได้รับจริงของจอนี้
-    this.frameTimestamps = [];
 
     // ผลตรวจล่าสุดของจอนี้ (ใช้ทำยอดรวมด้านบนหน้าเว็บ)
     this.lastDetectedCount = 0;
@@ -191,15 +170,9 @@ class StreamPanel {
     this.subtitle = document.createElement('p');
     this.subtitle.className = 'cam__subtitle';
 
-    // URL ของกล้องแยกเป็นบรรทัดของตัวเอง ตัวอักษรแบบ monospace (เฟส 10)
-    // เพราะเป็นข้อมูลที่ใช้วินิจฉัยได้ดีที่สุด (เช่นเห็นทันทีว่าสองจอ IP ซ้ำกัน)
-    // จอที่ยังไม่ได้ติดตั้งก็มีบรรทัดนี้ด้วย หัวจอทุกจอจึงสูงเท่ากัน ภาพเริ่มระดับเดียวกัน
-    // title เก็บ URL เต็มไว้ เผื่อจอแคบจนข้อความถูกตัดเป็น ...
-    this.urlLine = document.createElement('code');
-    this.urlLine.className = 'cam__url';
     this._renderSubtitle();
 
-    titleWrap.append(title, this.subtitle, this.urlLine);
+    titleWrap.append(title, this.subtitle);
 
     // จุดสถานะของกล้องตัวนี้ (แยกจากสถานะรวมของระบบ)
     const state = document.createElement('div');
@@ -251,41 +224,14 @@ class StreamPanel {
 
     this.videoBox.append(this.streamCanvas, this.overlayCanvas, this.idle, this.offline);
 
-    // ---------- ชุดสถิติของจอนี้ ----------
-    const stats = document.createElement('div');
-    stats.className = 'stats stats--cam';
-
-    this.stat = {};
-    PANEL_STATS.forEach((pair) => {
-      const key = pair[0];
-      const label = pair[1];
-
-      const cell = document.createElement('div');
-      cell.className = 'stat';
-
-      const labelEl = document.createElement('span');
-      labelEl.className = 'stat__label';
-      labelEl.textContent = label;
-
-      const valueEl = document.createElement('span');
-      valueEl.className = 'stat__value';
-      valueEl.textContent = '—';
-
-      cell.append(labelEl, valueEl);
-      stats.appendChild(cell);
-
-      // เก็บ reference ไว้ใน object ของ instance นี้ ไม่ใช้ id เลย
-      this.stat[key] = valueEl;
-    });
-
     // ---------- กล่องแจ้งเหตุของจอนี้ ----------
     this.alert = document.createElement('div');
     this.alert.className = 'alert alert--error';
     this.alert.hidden = true;
 
-    // ทุกจอมีโครงเดียวกันเป๊ะ (หัว -> ภาพ -> สถิติ -> แจ้งเหตุ)
+    // ทุกจอมีโครงเดียวกันเป๊ะ (หัว -> ภาพ -> แจ้งเหตุ)
     // ภาพของทุกจอจึงเริ่มที่ความสูงเดียวกันเสมอ ไม่มีจอไหนถูกดันลงมา
-    root.append(head, this.videoBox, stats, this.alert);
+    root.append(head, this.videoBox, this.alert);
     this.root = root;
   }
 
@@ -299,19 +245,6 @@ class StreamPanel {
     this.subtitle.textContent = this.isInstalled
       ? cam.name + ' · กล้อง IP'
       : cam.name + ' · ยังไม่ได้ติดตั้งกล้อง';
-
-    // URL จาก backend ถูกปิดบังชื่อผู้ใช้/รหัสผ่านไว้แล้วเสมอ (safe_url)
-    const url = this.isInstalled
-      ? (cam.url || '—')
-      : 'ไม่ได้ตั้ง ' + (cam.host_env || 'CAMERA_<ชื่อ>_HOST');
-    this.urlLine.textContent = url;
-    this.urlLine.title = url;
-    this.urlLine.classList.toggle('cam__url--none', !this.isInstalled);
-  }
-
-  /** ไฮไลต์ URL เป็นสีเหลืองเมื่อกล้องตัวนี้อยู่ในคำเตือนเรื่อง config (เฟส 10) */
-  setConfigWarned(warned) {
-    this.urlLine.classList.toggle('cam__url--warn', Boolean(warned));
   }
 
   /**
@@ -334,7 +267,7 @@ class StreamPanel {
     this.offline.hidden = false;
 
     this._setState('idle', 'ยังไม่ได้ติดตั้ง');
-    this._resetStats();
+    this._resetCounts();
   }
 
   /** เอาจอนี้ไปแปะในหน้าเว็บ */
@@ -356,8 +289,7 @@ class StreamPanel {
       return;
     }
 
-    this.frameTimestamps = [];
-    this.ctx = this.streamCanvas.getContext('2d', { alpha: false });
+    this.ctx =this.streamCanvas.getContext('2d', { alpha: false });
     this.reconnectDelay = WS_RECONNECT_MIN_MS;
     this.overlay.start();
     this._setState('pending', 'กำลังเชื่อมต่อ…');
@@ -393,7 +325,7 @@ class StreamPanel {
     this.idle.hidden = false;
     this.offline.hidden = true;
     this._setState('pending', 'ปิดอยู่');
-    this._resetStats();
+    this._resetCounts();
   }
 
   /** เก็บกวาดให้หมดก่อนทิ้งจอนี้ (ใช้ตอนรายชื่อกล้องเปลี่ยน) */
@@ -503,9 +435,6 @@ class StreamPanel {
       return;
     }
 
-    // อัปเดตตัวนับให้เห็นทันทีแม้ยังไม่มีภาพ
-    this._renderRetryCounters(status);
-
     if (data.alive) {
       this.alive = true;
       this.offline.hidden = true;
@@ -542,9 +471,6 @@ class StreamPanel {
     this.offline.hidden = false;
 
     // ตัวเลขที่ไม่มีความหมายแล้วต้องล้าง ไม่ใช่ปล่อยค้างค่าเดิมไว้ให้เข้าใจผิด
-    ['fps', 'rates', 'latency', 'process', 'faces', 'tracks', 'known'].forEach((key) => {
-      this.stat[key].textContent = '—';
-    });
     this.lastDetectedCount = 0;
     this.lastKnownCount = 0;
     this.onUpdate();
@@ -604,27 +530,12 @@ class StreamPanel {
       // (เช่นทดสอบด้วยกล้องตัวเดียว: /stream1 เป็น 1080p ส่วน /stream2 ต่ำกว่า)
       this.videoBox.style.aspectRatio = bitmap.width + ' / ' + bitmap.height;
       this.overlay.syncSize();
-      this.stat.resolution.textContent = bitmap.width + ' × ' + bitmap.height;
     }
 
     this.ctx.drawImage(bitmap, 0, 0);
     bitmap.close();
 
-    // ---- อัปเดตตัวเลขที่เปลี่ยนทุกเฟรม ----
     this.overlay.setFrameSize(meta.source_size || null);
-
-    this.stat.sentSize.textContent = meta.source_size
-      ? meta.source_size[0] + ' × ' + meta.source_size[1]
-      : '—';
-    this.stat.latency.textContent = meta.frame_age_ms + ' ms';
-
-    // อัตราสามค่าที่วัดได้จริงของกล้องตัวนี้ (เฟส 7) - ดูออกว่าขั้นไหนเป็นคอขวด
-    if (meta.fps) {
-      this.stat.rates.textContent =
-        meta.fps.capture + ' / ' + meta.fps.detect + ' / ' + meta.fps.stream;
-    }
-
-    this._recordFrame();
 
     // ---- อัปเดตกรอบ "เฉพาะตอนได้ผลตรวจชุดใหม่" (หัวใจของเฟส 7) ----
     //
@@ -634,13 +545,6 @@ class StreamPanel {
     if (meta.is_fresh) {
       const tracks = meta.tracks || [];
       const knownCount = tracks.filter((t) => t.identity_state === 'recognized').length;
-
-      this.stat.process.textContent =
-        (meta.detect_ms + meta.identify_ms).toFixed(1) +
-        ' ms (ตรวจ ' + meta.detect_ms + ' + จดจำ ' + meta.identify_ms + ')';
-      this.stat.faces.textContent = meta.detected_count + ' คน';
-      this.stat.tracks.textContent = tracks.length + ' track';
-      this.stat.known.textContent = knownCount + ' / ' + tracks.length + ' คน';
 
       this.overlay.setTracks(tracks);
 
@@ -652,22 +556,6 @@ class StreamPanel {
 
     // ผลตรวจเก่าเกินไป: ค่อย ๆ จางกรอบลง เพื่อสื่อว่ากำลังเดาตำแหน่งอยู่
     this.overlay.setStale(Boolean(meta.is_stale));
-  }
-
-  /** นับ fps ของภาพที่จอนี้ได้รับจริง */
-  _recordFrame() {
-    const now = performance.now();
-    this.frameTimestamps.push(now);
-
-    while (this.frameTimestamps.length && now - this.frameTimestamps[0] > 2000) {
-      this.frameTimestamps.shift();
-    }
-
-    const span = now - this.frameTimestamps[0];
-    if (span > 500 && this.frameTimestamps.length > 1) {
-      const fps = ((this.frameTimestamps.length - 1) * 1000) / span;
-      this.stat.fps.textContent = fps.toFixed(1) + ' fps';
-    }
   }
 
   // ==========================================================================
@@ -697,8 +585,6 @@ class StreamPanel {
       }
     }
 
-    this._renderRetryCounters(info);
-
     // ระหว่างที่ยังไม่ได้ดูภาพ ก็ควรเห็นว่ากล้องตัวไหนพร้อมหรือหลุดอยู่
     if (!this.running) {
       const view = describeCameraState(info);
@@ -710,13 +596,6 @@ class StreamPanel {
     }
   }
 
-  /** ตัวเลข "หลุด / ลองต่อ" ของจอนี้ */
-  _renderRetryCounters(info) {
-    if (info.reconnects === undefined && info.connect_attempts === undefined) return;
-    this.stat.reconnects.textContent =
-      (info.reconnects || 0) + ' / ' + (info.connect_attempts || 0) + ' ครั้ง';
-  }
-
   // ==========================================================================
   // ตัวช่วยเล็ก ๆ
   // ==========================================================================
@@ -725,10 +604,7 @@ class StreamPanel {
     this.stateText.textContent = text;
   }
 
-  _resetStats() {
-    Object.keys(this.stat).forEach((key) => {
-      this.stat[key].textContent = '—';
-    });
+  _resetCounts() {
     this.lastDetectedCount = 0;
     this.lastKnownCount = 0;
   }
@@ -742,12 +618,6 @@ class StreamPanel {
       this.alert.textContent = '';
       this.alert.hidden = true;
     }
-  }
-
-  /** อัปเดตตัวเลขอัตราการวาดกรอบ (ตัวเรียกเป็นคนกำหนดจังหวะ) */
-  refreshRenderFps() {
-    if (!this.overlay.isRunning) return;
-    this.stat.renderFps.textContent = this.overlay.renderFps + ' fps';
   }
 }
 
