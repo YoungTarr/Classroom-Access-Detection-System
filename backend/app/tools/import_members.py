@@ -93,10 +93,16 @@ class Plan:
 # ---------------------------------------------------------------------------
 # อ่านไฟล์ต้นทาง
 # ---------------------------------------------------------------------------
-def read_sources(import_dir: Path) -> tuple[list[dict[str, str]], dict[tuple[str, str, int], bytes]]:
-    """รวม responses.csv และรูปจากทุก zip (และโฟลเดอร์ที่แตกไว้แล้ว) ใน import_dir"""
+def read_sources(
+    import_dir: Path,
+) -> tuple[list[dict[str, str]], dict[tuple[str, str, int], list[bytes]]]:
+    """รวม responses.csv และรูปจากทุก zip (และโฟลเดอร์ที่แตกไว้แล้ว) ใน import_dir
+
+    รูปหนึ่งมุมอาจมีหลายไฟล์ เช่น .heic ต้นฉบับ + .jpg ที่ heic_to_jpg.py แปลงไว้
+    จึงเก็บไว้ทุกไฟล์ แล้วให้ to_jpeg เลือกไฟล์แรกที่เปิดได้
+    """
     csv_rows: dict[int, dict[str, str]] = {}
-    images: dict[tuple[str, str, int], bytes] = {}
+    images: dict[tuple[str, str, int], list[bytes]] = {}
 
     def take(name: str, data_fn) -> None:
         base = Path(name).name
@@ -108,7 +114,7 @@ def read_sources(import_dir: Path) -> tuple[list[dict[str, str]], dict[tuple[str
         m = FILE_RE.match(base)
         if m:
             key = (m["sid"], m["angle"], int(m["row"]))
-            images.setdefault(key, data_fn())  # มีหลายรูปในมุมเดียว ใช้รูปแรก
+            images.setdefault(key, []).append(data_fn())
 
     for path in sorted(import_dir.rglob("*")):
         if path.is_dir():
@@ -132,11 +138,15 @@ def strip_title(name: str) -> tuple[str, bool]:
     return name, False
 
 
-def to_jpeg(raw: bytes) -> tuple[bytes | None, np.ndarray | None, str | None]:
-    """ถอดรหัสรูป (หมุนตาม EXIF) ย่อ แล้วเข้ารหัสเป็น JPEG คืน (jpeg, ภาพ, ปัญหา)"""
-    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+def to_jpeg(candidates: list[bytes]) -> tuple[bytes | None, np.ndarray | None, str | None]:
+    """ถอดรหัสไฟล์แรกที่เปิดได้ (หมุนตาม EXIF) ย่อ แล้วเข้ารหัสเป็น JPEG คืน (jpeg, ภาพ, ปัญหา)"""
+    image = None
+    for raw in candidates:
+        image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        if image is not None:
+            break
     if image is None:
-        return None, None, "เปิดไฟล์รูปไม่ได้ (อาจเป็น HEIC หรือไฟล์เสีย)"
+        return None, None, "เปิดไฟล์รูปไม่ได้ (ถ้าเป็น HEIC ต้องรันผ่าน scripts/import-members ที่แปลงให้ก่อน)"
     height, width = image.shape[:2]
     scale = MAX_SIDE / max(height, width)
     if scale < 1.0:
