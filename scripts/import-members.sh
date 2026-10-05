@@ -17,5 +17,4 @@ MSYS_NO_PATHCONV=1 docker run --rm \
 # 2) นำเข้า
 MSYS_NO_PATHCONV=1 docker compose run --rm --no-deps \
   -v "./data/import:/data/import:ro" \
-  -v "./data/faces:/data/faces-rw" \
   backend python -m app.tools.import_members "$@"

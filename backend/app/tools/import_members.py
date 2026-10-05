@@ -22,7 +22,7 @@
   ไม่ตรงกัน = ไม่นำเข้าแถวนั้น (กรอกผิดฝั่งไหนก็ได้ ต้องให้คนตัดสิน)
   ถ้ามั่นใจว่าอีเมลถูก ใช้ --id-from-email ให้ใช้รหัสจากอีเมลแทน
 - ตัดคำนำหน้าชื่อ (นาย/นางสาว/นาง/น.ส.) ออก ให้ทุกคนแสดงชื่อแบบเดียวกัน
-- รูปแปลงเป็น JPEG ย่อด้านยาวไม่เกิน 1600px แล้วเก็บที่ data/faces/<รหัส>/<มุม>.jpg
+- รูปแปลงเป็น JPEG ย่อด้านยาวไม่เกิน 1600px แล้วเก็บในตาราง member_photos ของฐานข้อมูล
   และต้องตรวจเจอใบหน้า (ถ้าเจอหลายใบ หน้าใหญ่สุดต้องใหญ่กว่าใบอื่นชัดเจน) ไม่งั้นแจ้งปัญหา
   มุมนั้นจะไม่ถูกนำเข้า แต่มุมอื่นของคนเดียวกันยังนำเข้าได้
 - รูปที่เหมือนของเดิมทุกไบต์จะข้าม ไม่เขียนทับ
@@ -51,8 +51,6 @@ from app.face.detector import face_detector
 from app.identify.members import PHOTO_ANGLES
 
 IMPORT_DIR = Path("/data/import")
-# backend service mount data/faces แบบอ่านอย่างเดียว ตัวนำเข้าจึงเขียนผ่านจุด mount แยกนี้
-FACES_OUT_DIR = Path("/data/faces-rw")
 RELOAD_URL = "http://backend:8000/api/faces/reload"
 
 MAX_SIDE = 1600
@@ -247,8 +245,7 @@ def build_plans(args: argparse.Namespace) -> tuple[list[Plan], list[str]]:
                     )
                     continue
                 plan.notes.append(f"รูป {angle}: เจอ {len(faces)} ใบหน้า ใช้ใบที่ใหญ่ที่สุด (ใหญ่กว่าใบอื่นชัดเจน)")
-            target = FACES_OUT_DIR / sid / f"{angle}.jpg"
-            if target.exists() and target.read_bytes() == jpeg:
+            if database.fetch_member_photo(sid, angle) == jpeg:
                 plan.unchanged_photos.append(angle)
             else:
                 plan.photos[angle] = jpeg
@@ -268,39 +265,28 @@ def build_plans(args: argparse.Namespace) -> tuple[list[Plan], list[str]]:
 # บันทึกจริง
 # ---------------------------------------------------------------------------
 UPSERT_SQL = """
-    INSERT INTO members (student_id, first_name, last_name, photo_left, photo_front, photo_right)
-    VALUES (%(student_id)s, %(first_name)s, %(last_name)s, %(left)s, %(front)s, %(right)s)
+    INSERT INTO members (student_id, first_name, last_name)
+    VALUES (%(student_id)s, %(first_name)s, %(last_name)s)
     ON CONFLICT (student_id) DO UPDATE SET
-        first_name  = CASE WHEN %(rename)s THEN EXCLUDED.first_name ELSE members.first_name END,
-        last_name   = CASE WHEN %(rename)s THEN EXCLUDED.last_name  ELSE members.last_name  END,
-        photo_left  = COALESCE(EXCLUDED.photo_left,  members.photo_left),
-        photo_front = COALESCE(EXCLUDED.photo_front, members.photo_front),
-        photo_right = COALESCE(EXCLUDED.photo_right, members.photo_right)
+        first_name = CASE WHEN %(rename)s THEN EXCLUDED.first_name ELSE members.first_name END,
+        last_name  = CASE WHEN %(rename)s THEN EXCLUDED.last_name  ELSE members.last_name  END
 """
 
 
 def apply(plans: list[Plan]) -> None:
-    with database.pool.connection() as conn:
-        for plan in plans:
-            if plan.status in ("ไม่เปลี่ยน", "ข้าม"):
-                continue
-            folder = FACES_OUT_DIR / plan.student_id
-            folder.mkdir(parents=True, exist_ok=True)
-            for angle, jpeg in plan.photos.items():
-                (folder / f"{angle}.jpg").write_bytes(jpeg)
-
-            have = set(plan.photos) | set(plan.unchanged_photos)
-            paths = {
-                angle: (f"data/faces/{plan.student_id}/{angle}.jpg" if angle in have else None)
-                for angle in PHOTO_ANGLES
-            }
+    """เขียนสมาชิกและรูปลงฐานข้อมูล คนละธุรกรรมต่อคน (คนหนึ่งพังไม่ลากคนอื่นพังตาม)"""
+    for plan in plans:
+        if plan.status in ("ไม่เปลี่ยน", "ข้าม"):
+            continue
+        with database.pool.connection() as conn:
             conn.execute(UPSERT_SQL, {
                 "student_id": plan.student_id,
                 "first_name": plan.first_name,
                 "last_name": plan.last_name,
                 "rename": plan.rename,
-                **paths,
             })
+            for angle, jpeg in plan.photos.items():
+                database.save_member_photo(plan.student_id, angle, jpeg, conn=conn)
 
 
 def reload_backend() -> str:
@@ -324,6 +310,7 @@ def main() -> int:
     args = parser.parse_args()
 
     database.connect()
+    database.ensure_member_photos_table()
     plans, skipped = build_plans(args)
 
     print("=" * 72)
@@ -352,7 +339,7 @@ def main() -> int:
         return 0
 
     apply(plans)
-    print("\nบันทึกลงฐานข้อมูลและ data/faces/ เรียบร้อย")
+    print("\nบันทึกสมาชิกและรูปลงฐานข้อมูลเรียบร้อย")
     print(reload_backend())
     return 0
 

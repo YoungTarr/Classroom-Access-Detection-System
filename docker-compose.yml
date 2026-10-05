@@ -97,7 +97,8 @@ services:
     volumes:
       # mount โค้ดจากเครื่อง host เข้ามา แก้โค้ดแล้ว uvicorn --reload จะรีโหลดเอง ไม่ต้อง rebuild
       - ./backend/app:/app/app
-      # รูปใบหน้าของสมาชิก mount แบบอ่านอย่างเดียว กัน backend เขียนทับข้อมูลจริง
+      # โฟลเดอร์ "นำเข้า" รูปสมาชิก (รูปจริงเก็บในตาราง member_photos) รูปที่วางไว้ที่
+      # data/faces/<รหัส>/<มุม>.jpg จะถูกย้ายเข้าฐานข้อมูลตอนสตาร์ท/reload อ่านอย่างเดียวพอ
       - ./data/faces:/data/faces:ro
     depends_on:
       db:

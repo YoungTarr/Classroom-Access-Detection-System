@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -101,25 +102,117 @@ class Database:
             return DatabaseHealth(connected=False, error=str(exc))
 
     def fetch_members(self) -> list[dict[str, Any]]:
-        """ดึงรายชื่อสมาชิกทั้งหมด เรียงตามนามสกุลแล้วชื่อ (ตรงกับ index idx_members_name)"""
+        """ดึงรายชื่อสมาชิกทั้งหมด เรียงตามนามสกุลแล้วชื่อ (ตรงกับ index idx_members_name)
+
+        photo_angles = มุมที่มีรูปอยู่ในตาราง member_photos (ไม่ดึงตัวรูปมาด้วยเพราะหนัก)
+        """
         with self.pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id,
-                           student_id,
-                           first_name,
-                           last_name,
-                           photo_left,
-                           photo_front,
-                           photo_right,
-                           created_at,
-                           updated_at
-                      FROM members
-                     ORDER BY last_name, first_name
+                    SELECT m.id,
+                           m.student_id,
+                           m.first_name,
+                           m.last_name,
+                           COALESCE(
+                               (SELECT array_agg(p.angle ORDER BY p.angle)
+                                  FROM member_photos p
+                                 WHERE p.student_id = m.student_id),
+                               '{}'
+                           ) AS photo_angles,
+                           (SELECT max(p.updated_at) FROM member_photos p
+                             WHERE p.student_id = m.student_id) AS photos_updated_at,
+                           m.created_at,
+                           m.updated_at
+                      FROM members m
+                     ORDER BY m.last_name, m.first_name
                     """
                 )
                 return cur.fetchall()
+
+    # ------------------------------------------------------------------
+    # รูปใบหน้าของสมาชิก (เก็บตัวไฟล์ JPEG ในฐานข้อมูล)
+    # ------------------------------------------------------------------
+    # ต้องตรงกับ db/schema.sql (ไฟล์นั้นรันเฉพาะตอนสร้าง volume ใหม่)
+    # ฐานข้อมูลเดิมเก็บ "path ไฟล์" ไว้ในคอลัมน์ photo_* ของ members ซึ่งเลิกใช้แล้ว
+    # รูปเดิมที่อยู่ใน data/faces/<รหัส>/<มุม>.jpg จะถูกย้ายเข้าตารางให้เองโดย
+    # import_photos_from_folder (ชื่อไฟล์ตามแบบเดียวกับ path เดิมทุกประการ)
+    _MEMBER_PHOTOS_DDL = """
+        CREATE TABLE IF NOT EXISTS member_photos (
+            student_id  VARCHAR(20)  NOT NULL
+                        REFERENCES members (student_id) ON DELETE CASCADE ON UPDATE CASCADE,
+            angle       VARCHAR(5)   NOT NULL CHECK (angle IN ('front', 'left', 'right')),
+            image       BYTEA        NOT NULL,
+            updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+            PRIMARY KEY (student_id, angle)
+        );
+        ALTER TABLE members DROP COLUMN IF EXISTS photo_left;
+        ALTER TABLE members DROP COLUMN IF EXISTS photo_front;
+        ALTER TABLE members DROP COLUMN IF EXISTS photo_right;
+    """
+
+    def ensure_member_photos_table(self) -> None:
+        """สร้างตาราง member_photos ถ้ายังไม่มี (ปลอดภัยที่จะเรียกซ้ำ)"""
+        with self.pool.connection() as conn:
+            conn.execute(self._MEMBER_PHOTOS_DDL)
+
+    def fetch_member_photos(self) -> list[dict[str, Any]]:
+        """รูปทุกมุมของสมาชิกทุกคน (มีตัวรูปด้วย ใช้ตอนสร้างคลังใบหน้า)"""
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT student_id, angle, image FROM member_photos")
+                return cur.fetchall()
+
+    def fetch_member_photo(self, student_id: str, angle: str) -> bytes | None:
+        """รูปหนึ่งมุมของสมาชิกหนึ่งคน หรือ None ถ้าไม่มี"""
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT image FROM member_photos WHERE student_id = %s AND angle = %s",
+                    (student_id, angle),
+                )
+                row = cur.fetchone()
+                return bytes(row["image"]) if row else None
+
+    def save_member_photo(self, student_id: str, angle: str, image: bytes, conn=None) -> None:
+        """เพิ่มหรือแทนที่รูปหนึ่งมุม (ส่ง conn มาได้ ถ้าอยากให้อยู่ในธุรกรรมเดียวกับงานอื่น)"""
+        sql = """
+            INSERT INTO member_photos (student_id, angle, image)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (student_id, angle)
+            DO UPDATE SET image = EXCLUDED.image, updated_at = now()
+        """
+        if conn is not None:
+            conn.execute(sql, (student_id, angle, image))
+            return
+        with self.pool.connection() as own:
+            own.execute(sql, (student_id, angle, image))
+
+    def import_photos_from_folder(self, faces_dir: Path) -> list[str]:
+        """ย้ายรูปจาก <faces_dir>/<รหัส>/<มุม>.jpg เข้าตาราง เฉพาะมุมที่ในตารางยังไม่มี
+
+        ไม่เขียนทับรูปที่อยู่ในฐานข้อมูลแล้ว (ฐานข้อมูลคือของจริง โฟลเดอร์เป็นแค่ทางนำเข้า)
+        คืนรายการ "<รหัส>/<มุม>" ที่นำเข้า
+        """
+        if not faces_dir.is_dir():
+            return []
+        imported: list[str] = []
+        with self.pool.connection() as conn:
+            members = [r["student_id"] for r in conn.execute("SELECT student_id FROM members")]
+            have = {
+                (r["student_id"], r["angle"])
+                for r in conn.execute("SELECT student_id, angle FROM member_photos")
+            }
+            for student_id in members:
+                for angle in ("front", "left", "right"):
+                    path = faces_dir / student_id / f"{angle}.jpg"
+                    if (student_id, angle) in have or not path.is_file():
+                        continue
+                    self.save_member_photo(student_id, angle, path.read_bytes(), conn=conn)
+                    imported.append(f"{student_id}/{angle}")
+        if imported:
+            logger.info("ย้ายรูปจาก %s เข้าฐานข้อมูล %d รูป: %s", faces_dir, len(imported), ", ".join(imported))
+        return imported
 
     def count_members(self) -> int:
         """นับจำนวนสมาชิกทั้งหมด (ใช้ในหน้า health)"""

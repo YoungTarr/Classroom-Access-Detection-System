@@ -54,7 +54,7 @@ class FaceIdentifier(Identifier):
     # สร้างคลังเวกเตอร์
     # ------------------------------------------------------------------
     def reload(self) -> IndexBuildReport:
-        """สร้างคลังเวกเตอร์ใหม่ทั้งหมดจากฐานข้อมูลและไฟล์รูป
+        """สร้างคลังเวกเตอร์ใหม่ทั้งหมดจากรายชื่อและรูปในฐานข้อมูล
 
         เมธอดนี้โยน exception ได้ถ้าโครงสร้างพื้นฐานมีปัญหา (เช่นโมเดลยังไม่โหลด
         หรือต่อฐานข้อมูลไม่ได้) เพราะผู้เรียกคือ endpoint ที่รอผลอยู่และควรเห็นสาเหตุเต็ม ๆ
@@ -81,24 +81,16 @@ class FaceIdentifier(Identifier):
             if not member.photos:
                 report.problems.append(
                     f"{member.student_id} ({member.full_name}): "
-                    f"ไม่ได้กำหนด path รูปไว้ในฐานข้อมูลเลยสักมุม"
+                    f"ไม่มีรูปใบหน้าในฐานข้อมูลเลยสักมุม (ตาราง member_photos)"
                 )
 
             for photo in member.photos:
-                # ---- กรณีที่ 1: ไม่มีไฟล์ ----
-                if not photo.resolved.exists():
-                    report.problems.append(
-                        f"{member.student_id} {photo.angle}: ไม่พบไฟล์ {photo.resolved} "
-                        f"(ฐานข้อมูลระบุไว้ว่า {photo.raw_path})"
-                    )
-                    continue
-
-                # ---- กรณีที่ 2: มีไฟล์แต่เปิดไม่ได้ ----
-                image = cv2.imread(str(photo.resolved))
+                # ---- กรณีที่ 1-2: รูปในฐานข้อมูลเปิดไม่ได้ ----
+                image = cv2.imdecode(np.frombuffer(photo.image, np.uint8), cv2.IMREAD_COLOR)
                 if image is None:
                     report.problems.append(
-                        f"{member.student_id} {photo.angle}: เปิดไฟล์ {photo.label} ไม่ได้ "
-                        f"(ไฟล์อาจเสีย หรือไม่ใช่ไฟล์รูปภาพ)"
+                        f"{member.student_id} {photo.angle}: เปิดรูป {photo.label} ไม่ได้ "
+                        f"(ข้อมูลรูปในฐานข้อมูลอาจเสีย หรือไม่ใช่ไฟล์รูปภาพ)"
                     )
                     continue
 
@@ -114,7 +106,7 @@ class FaceIdentifier(Identifier):
 
                 if not faces:
                     report.problems.append(
-                        f"{member.student_id} {photo.angle}: เปิดไฟล์ {photo.label} ได้ "
+                        f"{member.student_id} {photo.angle}: เปิดรูป {photo.label} ได้ "
                         f"แต่หาใบหน้าในรูปไม่เจอ (ลองใช้รูปที่หน้าชัดและใหญ่กว่านี้)"
                     )
                     continue
@@ -187,7 +179,7 @@ class FaceIdentifier(Identifier):
             )
 
         if report.problems:
-            logger.warning("พบปัญหากับไฟล์รูป %d รายการ:", len(report.problems))
+            logger.warning("พบปัญหากับรูปสมาชิก %d รายการ:", len(report.problems))
             for problem in report.problems:
                 logger.warning("   - %s", problem)
 
@@ -195,7 +187,7 @@ class FaceIdentifier(Identifier):
         if report.vector_count == 0:
             logger.error(
                 "คลังใบหน้าว่างเปล่า! ระบบจะแสดง Unknown กับทุกคนจนกว่าจะมีรูปที่ใช้ได้ "
-                "วางไฟล์ไว้ที่ data/faces/<รหัสนักศึกษา>/ แล้วเรียก GET /api/faces/reload"
+                "นำเข้าด้วย scripts/import-members หรือวางรูปที่ data/faces/<รหัสนักศึกษา>/<มุม>.jpg แล้วเรียก GET /api/faces/reload"
             )
 
         logger.info("-" * 70)
@@ -233,7 +225,7 @@ class FaceIdentifier(Identifier):
                 detail=(
                     "ยังไม่มีเวกเตอร์ใบหน้าในระบบเลย "
                     f"(สมาชิก {self._report.member_count} คน แต่ไม่มีรูปที่ใช้ได้) "
-                    "วางไฟล์ที่ data/faces/<รหัสนักศึกษา>/ แล้วเรียก /api/faces/reload"
+                    "นำเข้าด้วย scripts/import-members หรือวางรูปที่ data/faces/<รหัสนักศึกษา>/ แล้วเรียก /api/faces/reload"
                 ),
             )
 

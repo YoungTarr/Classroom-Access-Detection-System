@@ -484,7 +484,7 @@ body {
   white-space: normal !important;
 }
 
-/* จุดบอกว่ามี path รูปครบ 3 มุมหรือไม่ */
+/* จุดบอกว่ามีรูปในฐานข้อมูลครบ 3 มุมหรือไม่ (จุดสีเขียวกดเปิดดูรูปได้) */
 .photo-dots {
   display: inline-flex;
   gap: 5px;
@@ -499,6 +499,10 @@ body {
 
 .photo-dot--set {
   background: var(--ok);
+}
+
+a.photo-dot--set:hover {
+  box-shadow: 0 0 0 3px rgba(62, 207, 142, 0.35);
 }
 
 /* ---------------------------------------------------------------------------

@@ -148,7 +148,8 @@ class AppSettings:
     # origin ที่อนุญาตให้เรียกข้ามโดเมน ปกติเป็นลิสต์ว่างเพราะ nginx proxy ให้แล้ว
     cors_origins: list[str] = field(default_factory=list)
 
-    # โฟลเดอร์เก็บรูปใบหน้า (path ภายใน container)
+    # โฟลเดอร์ "นำเข้า" รูปใบหน้า (path ภายใน container) รูปจริงเก็บในตาราง member_photos
+    # รูปที่วางไว้ที่ <faces_dir>/<รหัส>/<มุม>.jpg จะถูกย้ายเข้าฐานข้อมูลตอนโหลดสมาชิก
     faces_dir: Path = Path("/data/faces")
 
 

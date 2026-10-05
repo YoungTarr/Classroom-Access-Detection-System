@@ -9,9 +9,7 @@
 -- -----------------------------------------------------------------------------
 -- ตาราง members : รายชื่อสมาชิกของหลักสูตร (คนที่ระบบต้องจดจำใบหน้าได้)
 --
--- หมายเหตุเรื่องรูป: ในฐานข้อมูลเก็บแค่ "path" ของไฟล์ ไม่ได้เก็บตัวรูป
--- ไฟล์รูปจริงอยู่ที่  data/faces/<student_id>/   บนเครื่อง host
--- ซึ่งถูก mount เข้า container ของ backend ที่ /data/faces (อ่านอย่างเดียว)
+-- รูปใบหน้าเก็บแยกในตาราง member_photos (ด้านล่าง) เป็นตัวไฟล์ JPEG ในฐานข้อมูล
 -- เก็บ 3 มุมต่อคน เพื่อให้จดจำได้แม้หันหน้าไม่ตรงกล้อง
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS members (
@@ -19,9 +17,6 @@ CREATE TABLE IF NOT EXISTS members (
     student_id  VARCHAR(20)  NOT NULL UNIQUE,
     first_name  VARCHAR(100) NOT NULL,
     last_name   VARCHAR(100) NOT NULL,
-    photo_left  VARCHAR(255),
-    photo_front VARCHAR(255),
-    photo_right VARCHAR(255),
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
@@ -32,9 +27,6 @@ COMMENT ON COLUMN members.id          IS 'รหัสอ้างอิงภ�
 COMMENT ON COLUMN members.student_id  IS 'รหัสนักศึกษา ห้ามซ้ำ ใช้เป็นชื่อโฟลเดอร์เก็บรูปใน data/faces/';
 COMMENT ON COLUMN members.first_name  IS 'ชื่อจริง (ภาษาไทย) ใช้แสดงบนกรอบใบหน้าเมื่อจดจำได้';
 COMMENT ON COLUMN members.last_name   IS 'นามสกุล (ภาษาไทย) ใช้แสดงบนกรอบใบหน้าเมื่อจดจำได้';
-COMMENT ON COLUMN members.photo_left  IS 'path ไฟล์รูปใบหน้าด้านซ้าย เทียบจากรากโปรเจกต์ เช่น data/faces/66200407/left.jpg';
-COMMENT ON COLUMN members.photo_front IS 'path ไฟล์รูปใบหน้าด้านหน้า เทียบจากรากโปรเจกต์ เช่น data/faces/66200407/front.jpg';
-COMMENT ON COLUMN members.photo_right IS 'path ไฟล์รูปใบหน้าด้านขวา เทียบจากรากโปรเจกต์ เช่น data/faces/66200407/right.jpg';
 COMMENT ON COLUMN members.created_at  IS 'เวลาที่เพิ่มรายชื่อเข้าระบบ (โซนเวลา Asia/Bangkok)';
 COMMENT ON COLUMN members.updated_at  IS 'เวลาที่แก้ไขล่าสุด อัปเดตอัตโนมัติด้วย trigger trg_members_updated_at';
 
@@ -60,6 +52,30 @@ CREATE TRIGGER trg_members_updated_at
     BEFORE UPDATE ON members
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
+
+-- -----------------------------------------------------------------------------
+-- ตาราง member_photos : รูปใบหน้าของสมาชิก (ตัวไฟล์ JPEG) มุมละหนึ่งแถว
+--
+-- ระบบอ่านรูปจากตารางนี้ไปสร้างคลังใบหน้าทุกครั้งที่สตาร์ทหรือเรียก /api/faces/reload
+-- นำเข้ารูปด้วย scripts/import-members หรือวางไฟล์ที่ data/faces/<รหัส>/<มุม>.jpg
+-- (ไฟล์ในโฟลเดอร์จะถูกย้ายเข้าตารางให้เอง เฉพาะมุมที่ในตารางยังไม่มี)
+--
+-- ตารางนี้ถูกสร้างซ้ำด้วย CREATE TABLE IF NOT EXISTS ตอน backend สตาร์ทด้วย
+-- (app/db/database.py) ถ้าแก้โครงสร้างตรงนี้ ต้องแก้ในนั้นให้ตรงกันด้วย
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS member_photos (
+    student_id  VARCHAR(20)  NOT NULL
+                REFERENCES members (student_id) ON DELETE CASCADE ON UPDATE CASCADE,
+    angle       VARCHAR(5)   NOT NULL CHECK (angle IN ('front', 'left', 'right')),
+    image       BYTEA        NOT NULL,
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (student_id, angle)
+);
+
+COMMENT ON TABLE  member_photos            IS 'รูปใบหน้าของสมาชิก มุมละหนึ่งแถว ใช้สร้างคลังเวกเตอร์สำหรับจดจำ';
+COMMENT ON COLUMN member_photos.angle      IS 'มุมของรูป: front = หน้าตรง, left = ด้านซ้าย, right = ด้านขวา';
+COMMENT ON COLUMN member_photos.image      IS 'ตัวไฟล์รูป JPEG (ลบสมาชิกแล้วรูปถูกลบตามอัตโนมัติ)';
+COMMENT ON COLUMN member_photos.updated_at IS 'เวลาที่เปลี่ยนรูปล่าสุด';
 
 -- -----------------------------------------------------------------------------
 -- ตาราง access_logs : ประวัติการเข้า-ออกห้อง (เฟส 12)

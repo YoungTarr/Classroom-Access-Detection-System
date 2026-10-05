@@ -81,7 +81,7 @@ async def lifespan(_: FastAPI):
     logger.info("=" * 70)
     logger.info("%s v%s กำลังเริ่มทำงาน", settings.app.name, settings.app.version)
     logger.info("ฐานข้อมูล: %s", settings.database.safe_repr())
-    logger.info("โฟลเดอร์รูปใบหน้า: %s", settings.app.faces_dir)
+    logger.info("โฟลเดอร์นำเข้ารูปใบหน้า (รูปจริงเก็บในฐานข้อมูล): %s", settings.app.faces_dir)
     logger.info("แหล่งภาพ: %s", settings.stream.source)
     logger.info("=" * 70)
 
@@ -91,6 +91,12 @@ async def lifespan(_: FastAPI):
     health = database.check_health()
     if health.connected:
         logger.info("เชื่อมต่อฐานข้อมูลสำเร็จ (%s)", health.version)
+        # สร้างตารางรูปสมาชิก (และอัปเกรดฐานข้อมูลเดิมที่เก็บรูปเป็น path) ตั้งแต่ต้น
+        # /api/members จะได้ใช้ได้ แม้โหลดโมเดลใบหน้าไม่สำเร็จ
+        try:
+            database.ensure_member_photos_table()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("สร้างตาราง member_photos ไม่สำเร็จ: %s", exc)
     else:
         # ไม่ทำให้แอปตาย เพื่อให้ /api/health ยังตอบได้และบอกสาเหตุให้ผู้ใช้เห็น
         logger.error("เชื่อมต่อฐานข้อมูลไม่สำเร็จ: %s", health.error)
@@ -532,10 +538,14 @@ def list_members() -> dict[str, Any]:
             "student_id": row["student_id"],
             "first_name": row["first_name"],
             "last_name": row["last_name"],
+            # มุมที่มีรูปในฐานข้อมูล -> URL ของรูป (มุมที่ไม่มีรูปเป็น null)
             "photos": {
-                "left": row["photo_left"],
-                "front": row["photo_front"],
-                "right": row["photo_right"],
+                angle: (
+                    f"/api/members/{row['student_id']}/photos/{angle}"
+                    f"?v={int(row['photos_updated_at'].timestamp())}"
+                    if angle in row["photo_angles"] else None
+                )
+                for angle in ("left", "front", "right")
             },
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
             "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
@@ -544,6 +554,22 @@ def list_members() -> dict[str, Any]:
     ]
 
     return {"total": len(members), "members": members}
+
+
+@app.get("/api/members/{student_id}/photos/{angle}", tags=["สมาชิก"])
+def get_member_photo(student_id: str, angle: str) -> Response:
+    """รูปใบหน้าของสมาชิก (JPEG) จากตาราง member_photos - angle เป็น front / left / right"""
+    if angle not in ("front", "left", "right"):
+        raise HTTPException(status_code=422, detail="angle ต้องเป็น front, left หรือ right")
+    try:
+        jpeg = database.fetch_member_photo(student_id, angle)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("อ่านรูป %s/%s ไม่สำเร็จ: %s", student_id, angle, exc)
+        raise HTTPException(status_code=503, detail=f"อ่านรูปจากฐานข้อมูลไม่ได้: {exc}") from exc
+    if jpeg is None:
+        raise HTTPException(status_code=404, detail=f"สมาชิก {student_id} ไม่มีรูปมุม {angle}")
+    # รูปเปลี่ยนเมื่อไหร่ URL ใน /api/members จะเปลี่ยน ?v= ตาม จึง cache ได้ไม่ต้องกลัวรูปเก่าค้าง
+    return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/api/access-logs", tags=["ประวัติ"])

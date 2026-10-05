@@ -996,7 +996,7 @@ function renderTableMessage(message) {
   el.memberTbody.appendChild(tr);
 }
 
-/** จุดสามจุดบอกว่ามี path รูปซ้าย/หน้า/ขวา ครบหรือไม่ */
+/** จุดสามจุดบอกว่ามีรูปซ้าย/หน้า/ขวาในฐานข้อมูลครบหรือไม่ จุดที่มีรูปกดเปิดดูรูปได้ */
 function buildPhotoDots(photos) {
   const wrap = document.createElement('span');
   wrap.className = 'photo-dots';
@@ -1005,10 +1005,15 @@ function buildPhotoDots(photos) {
   angles.forEach(function (pair) {
     const key = pair[0];
     const label = pair[1];
-    const dot = document.createElement('span');
-    const has = Boolean(photos && photos[key]);
-    dot.className = 'photo-dot' + (has ? ' photo-dot--set' : '');
-    dot.title = label + ': ' + (has ? photos[key] : 'ยังไม่ได้กำหนด');
+    const url = photos && photos[key];
+    const dot = document.createElement(url ? 'a' : 'span');
+    dot.className = 'photo-dot' + (url ? ' photo-dot--set' : '');
+    dot.title = label + ': ' + (url ? 'กดเพื่อดูรูป' : 'ยังไม่มีรูป');
+    if (url) {
+      dot.href = url;
+      dot.target = '_blank';
+      dot.rel = 'noopener';
+    }
     wrap.appendChild(dot);
   });
 
