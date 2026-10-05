@@ -29,3 +29,7 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+
+# ---------- ไฟล์นำเข้าจาก Google Form (ข้อมูลส่วนบุคคล ห้ามขึ้น git) ----------
+data/import/*
+!data/import/.gitkeep
