@@ -141,7 +141,7 @@ class AppSettings:
     """ค่าทั่วไปของแอปพลิเคชัน"""
 
     name: str = "Classroom Access Detection System"
-    version: str = "0.12.0"  # เฟส 12: บันทึกประวัติเข้า-ออกลง PostgreSQL
+    version: str = "0.13.0"  # เฟส 13: บันทึกคนที่ไม่รู้จัก (Unknown) พร้อมรูปใบหน้า
     log_level: str = "INFO"
     timezone: str = "Asia/Bangkok"
 
