@@ -1099,7 +1099,7 @@ async function loadAccessLogs() {
       const tdNo = document.createElement('td');
       tdNo.textContent = log.id;
 
-      // รูปใบหน้า (เฟส 13 - มีเฉพาะคนที่ไม่รู้จัก) กดแล้วเปิดรูปเต็มในแท็บใหม่
+      // รูปใบหน้าที่ตรวจเจอ (เฟส 13 - ทั้งสมาชิกและ Unknown) กดแล้วเปิดรูปเต็มในแท็บใหม่
       const tdFace = document.createElement('td');
       if (log.face_url) {
         const link = document.createElement('a');

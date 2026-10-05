@@ -600,7 +600,7 @@ def list_access_logs(
 
 @app.get("/api/access-logs/{log_id}/face", tags=["ประวัติ"])
 def get_access_log_face(log_id: int) -> Response:
-    """รูปใบหน้า (JPEG) ที่บันทึกไว้กับประวัติรายการนี้ (มีเฉพาะคนที่ไม่รู้จัก)"""
+    """รูปใบหน้า (JPEG) ที่บันทึกไว้กับประวัติรายการนี้ (ทั้งสมาชิกและคนที่ไม่รู้จัก)"""
     try:
         jpeg = database.fetch_access_log_face(log_id)
     except Exception as exc:  # noqa: BLE001

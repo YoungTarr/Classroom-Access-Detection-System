@@ -321,7 +321,7 @@ class CameraRunner:
         (decided_identity) ไม่ใช่ผลของเฟรมเดียว จึงไม่บันทึกมั่วจากการจำพลาดชั่วคราว
         ทิศทางคือทิศทางของกล้องตัวนี้: IN = เข้า, OUT = ออก
 
-        คนที่ไม่รู้จัก (เฟส 13) ดูที่ _is_confirmed_unknown และครอปรูปใบหน้าจาก image เก็บไว้ด้วย
+        คนที่ไม่รู้จัก (เฟส 13) ดูที่ _is_confirmed_unknown ทุกรายการครอปรูปใบหน้าจาก image เก็บไว้ด้วย
 
         ห้ามโยน exception ออกไป ไม่งั้นจะลากลูปตรวจจับของกล้องให้ล้มด้วย
         """
@@ -348,6 +348,7 @@ class CameraRunner:
                     continue
                 self._logged_keys.add(key)
 
+                bbox = tuple(track.bbox)
                 self.access_logger.submit(AccessEvent(
                     student_id=identity.student_id,
                     first_name=identity.first_name,
@@ -356,10 +357,12 @@ class CameraRunner:
                     camera_id=self.camera_id,
                     camera_name=self.camera.name,
                     logged_at=datetime.now(timezone.utc),
-                    bbox=tuple(track.bbox),
+                    bbox=bbox,
                     frame_size=result.source_size,
                     confidence=identity.confidence,
                     track_id=track.track_id,
+                    # เก็บรูปของสมาชิกด้วย ไว้ตรวจย้อนหลังว่าระบบจำถูกคนจริงไหม
+                    face_image=crop_face(image, bbox),
                 ))
 
             # track ที่หายไปแล้วไม่ต้องจำต่อ (ไม่งั้นเซ็ตโตขึ้นเรื่อย ๆ)

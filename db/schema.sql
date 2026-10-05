@@ -70,7 +70,7 @@ CREATE TRIGGER trg_members_updated_at
 -- ทิศทางมาจากการตั้งค่ากล้อง (CAMERA_n_DIRECTION) ไม่ได้มาจากการเดินซ้าย/ขวาในภาพ
 --
 -- เฟส 13: คนที่ไม่รู้จักก็บันทึกด้วย (is_unknown = true) รหัส/ชื่อเป็น NULL
--- และเก็บรูปใบหน้าที่ครอปไว้ใน face_jpeg แทน
+-- ทุกรายการ (รวมสมาชิก) เก็บรูปใบหน้าที่ครอปไว้ใน face_jpeg
 --
 -- เก็บชื่อ-นามสกุลซ้ำไว้ในแถว (snapshot) โดยตั้งใจ และไม่ทำ foreign key ไป members
 -- เพื่อให้ประวัติยังถูกต้องแม้ภายหลังมีการแก้ชื่อหรือลบสมาชิกออก
@@ -111,7 +111,7 @@ COMMENT ON COLUMN access_logs.is_unknown   IS 'true = คนที่ไม่�
 COMMENT ON COLUMN access_logs.student_id   IS 'รหัสนักศึกษาของคนที่จดจำได้ (NULL ถ้าไม่รู้จัก)';
 COMMENT ON COLUMN access_logs.first_name   IS 'ชื่อ ณ เวลาที่บันทึก (snapshot, NULL ถ้าไม่รู้จัก)';
 COMMENT ON COLUMN access_logs.last_name    IS 'นามสกุล ณ เวลาที่บันทึก (snapshot, NULL ถ้าไม่รู้จัก)';
-COMMENT ON COLUMN access_logs.face_jpeg    IS 'รูปใบหน้าที่ครอปจากกล้อง (JPEG) เก็บเฉพาะคนที่ไม่รู้จัก';
+COMMENT ON COLUMN access_logs.face_jpeg    IS 'รูปใบหน้าที่ครอปจากกล้อง (JPEG) เก็บทั้งสมาชิกและคนที่ไม่รู้จัก';
 COMMENT ON COLUMN access_logs.logged_at    IS 'วันเวลาที่ระบบจดจำได้ (เวลาที่ตรวจเจอ ไม่ใช่เวลาที่เขียนลงฐานข้อมูล)';
 COMMENT ON COLUMN access_logs.direction    IS 'IN = เข้าห้อง (กล้องขาเข้า), OUT = ออกจากห้อง (กล้องขาออก)';
 COMMENT ON COLUMN access_logs.camera_id    IS 'รหัสกล้องที่จับภาพได้ (CAMERA_IDS ใน .env)';
