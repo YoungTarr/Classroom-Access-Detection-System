@@ -23,7 +23,8 @@
   ถ้ามั่นใจว่าอีเมลถูก ใช้ --id-from-email ให้ใช้รหัสจากอีเมลแทน
 - ตัดคำนำหน้าชื่อ (นาย/นางสาว/นาง/น.ส.) ออก ให้ทุกคนแสดงชื่อแบบเดียวกัน
 - รูปแปลงเป็น JPEG ย่อด้านยาวไม่เกิน 1600px แล้วเก็บที่ data/faces/<รหัส>/<มุม>.jpg
-  และต้องตรวจเจอใบหน้า "หนึ่งใบพอดี" ไม่งั้นแจ้งปัญหา (มุมนั้นจะไม่ถูกนำเข้า)
+  และต้องตรวจเจอใบหน้า (ถ้าเจอหลายใบ หน้าใหญ่สุดต้องใหญ่กว่าใบอื่นชัดเจน) ไม่งั้นแจ้งปัญหา
+  มุมนั้นจะไม่ถูกนำเข้า แต่มุมอื่นของคนเดียวกันยังนำเข้าได้
 - รูปที่เหมือนของเดิมทุกไบต์จะข้าม ไม่เขียนทับ
 - รหัสที่มีในฐานข้อมูลอยู่แล้วแต่ชื่อไม่ตรง จะไม่แก้ชื่อให้ (อาจกรอกรหัสคนอื่น)
   ถ้าตั้งใจแก้ชื่อจริง ใช้ --allow-rename
@@ -56,6 +57,9 @@ RELOAD_URL = "http://backend:8000/api/faces/reload"
 
 MAX_SIDE = 1600
 JPEG_QUALITY = 92
+
+# รูปที่ติดหน้าคนอื่นมาด้วย: รับได้ถ้าหน้าใหญ่สุดมีพื้นที่ใหญ่กว่าหน้าที่สองอย่างน้อยกี่เท่า
+DOMINANT_FACE_RATIO = 4.0
 
 # เรียงจากยาวไปสั้น ไม่งั้น "นาง" จะตัด "นางสาว" ไม่หมด
 TITLE_PREFIXES = ("นางสาว", "น.ส.", "นาย", "นาง", "Miss", "Mrs.", "Mr.", "Ms.")
@@ -227,12 +231,22 @@ def build_plans(args: argparse.Namespace) -> tuple[list[Plan], list[str]]:
             if problem:
                 plan.problems.append(f"รูป {angle}: {problem}")
                 continue
-            faces = face_detector.detect(image)
-            if len(faces) != 1:
-                plan.problems.append(
-                    f"รูป {angle}: ตรวจเจอใบหน้า {len(faces)} ใบ (ต้องมี 1 ใบพอดี) จึงไม่นำเข้ามุมนี้"
-                )
+            faces = sorted(face_detector.detect(image), key=lambda f: f.w * f.h, reverse=True)
+            if not faces:
+                plan.problems.append(f"รูป {angle}: ตรวจไม่เจอใบหน้า จึงไม่นำเข้ามุมนี้")
                 continue
+            if len(faces) > 1:
+                # ตอนสร้างคลัง ระบบเลือกหน้าที่ใหญ่ที่สุด (face_identifier.py) จึงรับได้
+                # ถ้าหน้าใหญ่สุดใหญ่กว่าหน้าอื่นมากจนไม่มีทางเลือกผิดคน
+                # และตัวตรวจจับต้องมั่นใจในหน้าใหญ่สุดไม่น้อยกว่าใบอื่น
+                # (กรอบใหญ่แต่คะแนนต่ำมักเป็นของที่ไม่ใช่หน้า เช่น มือ/ผมที่ถูกจับรวมเข้าไป)
+                biggest, second = faces[0].w * faces[0].h, faces[1].w * faces[1].h
+                if biggest < DOMINANT_FACE_RATIO * second or faces[0].score < faces[1].score:
+                    plan.problems.append(
+                        f"รูป {angle}: เจอ {len(faces)} ใบหน้า ไม่แน่ใจว่าใบไหนเป็นเจ้าของรูป จึงไม่นำเข้ามุมนี้"
+                    )
+                    continue
+                plan.notes.append(f"รูป {angle}: เจอ {len(faces)} ใบหน้า ใช้ใบที่ใหญ่ที่สุด (ใหญ่กว่าใบอื่นชัดเจน)")
             target = FACES_OUT_DIR / sid / f"{angle}.jpg"
             if target.exists() and target.read_bytes() == jpeg:
                 plan.unchanged_photos.append(angle)
