@@ -551,10 +551,14 @@ def list_access_logs(
     limit: int = Query(50, ge=1, le=500, description="จำนวนรายการสูงสุด (ใหม่สุดก่อน)"),
     direction: str | None = Query(None, description="กรองเฉพาะ IN (เข้า) หรือ OUT (ออก)"),
     student_id: str | None = Query(None, description="กรองเฉพาะรหัสนักศึกษาคนหนึ่ง"),
+    unknown: bool | None = Query(
+        None, description="true = เฉพาะคนที่ไม่รู้จัก / false = เฉพาะสมาชิก / ไม่ส่ง = ทั้งหมด"
+    ),
 ) -> dict[str, Any]:
     """ประวัติการเข้า-ออกห้องที่ระบบบันทึกอัตโนมัติ เรียงใหม่สุดก่อน
 
     ชื่อ-นามสกุลคือ snapshot ณ เวลาที่บันทึก (ไม่เปลี่ยนตามการแก้ชื่อสมาชิกภายหลัง)
+    คนที่ไม่รู้จัก: is_unknown=true รหัส/ชื่อเป็น null และเปิดดูรูปใบหน้าได้ที่ face_url
     """
     if direction is not None:
         direction = direction.upper()
@@ -562,7 +566,9 @@ def list_access_logs(
             raise HTTPException(status_code=422, detail="direction ต้องเป็น IN หรือ OUT")
 
     try:
-        rows = database.fetch_access_logs(limit=limit, direction=direction, student_id=student_id)
+        rows = database.fetch_access_logs(
+            limit=limit, direction=direction, student_id=student_id, unknown=unknown
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("อ่านประวัติเข้า-ออกไม่สำเร็จ: %s", exc)
         raise HTTPException(status_code=503, detail=f"อ่านประวัติจากฐานข้อมูลไม่ได้: {exc}") from exc
@@ -570,6 +576,11 @@ def list_access_logs(
     logs = [
         {
             "id": row["id"],
+            "is_unknown": row["is_unknown"],
+            "face_url": (
+                f"/api/access-logs/{row['id']}/face?v={int(row['logged_at'].timestamp() * 1000)}"
+                if row["has_face"] else None
+            ),
             "student_id": row["student_id"],
             "first_name": row["first_name"],
             "last_name": row["last_name"],
@@ -585,6 +596,27 @@ def list_access_logs(
         for row in rows
     ]
     return {"total": len(logs), "logs": logs}
+
+
+@app.get("/api/access-logs/{log_id}/face", tags=["ประวัติ"])
+def get_access_log_face(log_id: int) -> Response:
+    """รูปใบหน้า (JPEG) ที่บันทึกไว้กับประวัติรายการนี้ (มีเฉพาะคนที่ไม่รู้จัก)"""
+    try:
+        jpeg = database.fetch_access_log_face(log_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("อ่านรูปใบหน้าของประวัติ #%d ไม่สำเร็จ: %s", log_id, exc)
+        raise HTTPException(status_code=503, detail=f"อ่านรูปจากฐานข้อมูลไม่ได้: {exc}") from exc
+
+    if jpeg is None:
+        raise HTTPException(status_code=404, detail=f"ประวัติลำดับที่ {log_id} ไม่มีรูปใบหน้า")
+
+    # ให้เบราว์เซอร์ cache ได้ เพราะตารางบนหน้าเว็บรีเฟรชทุก 5 วินาที
+    # แต่เลขลำดับถูกใช้ซ้ำได้หลังลบประวัติ (ดู _RESET_SEQUENCE_SQL) face_url จึงพ่วง
+    # ?v=<เวลาที่บันทึก> ไว้ รายการใหม่ที่ได้เลขเดิมจะได้ URL ใหม่ ไม่โชว์หน้าคนเก่า
+    return Response(
+        content=jpeg, media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
 
 
 @app.delete("/api/access-logs/{log_id}", tags=["ประวัติ"])

@@ -1067,7 +1067,7 @@ function renderAccessMessage(message) {
   el.accessTbody.replaceChildren();
   const tr = document.createElement('tr');
   const td = document.createElement('td');
-  td.colSpan = 6;
+  td.colSpan = 7;
   td.className = 'table__empty';
   td.textContent = message;
   tr.appendChild(td);
@@ -1087,19 +1087,50 @@ async function loadAccessLogs() {
     setText(el.accessCount, 'ล่าสุด ' + logs.length + ' รายการ');
 
     if (logs.length === 0) {
-      renderAccessMessage('ยังไม่มีประวัติ - จะบันทึกอัตโนมัติเมื่อกล้องจดจำสมาชิกได้');
+      renderAccessMessage('ยังไม่มีประวัติ - จะบันทึกอัตโนมัติเมื่อกล้องตรวจเจอคน (ทั้งสมาชิกและคนที่ไม่รู้จัก)');
       return;
     }
 
     el.accessTbody.replaceChildren();
     logs.forEach(function (log) {
       const tr = document.createElement('tr');
+      if (log.is_unknown) tr.className = 'access-row--unknown';
 
       const tdNo = document.createElement('td');
       tdNo.textContent = log.id;
 
+      // รูปใบหน้า (เฟส 13 - มีเฉพาะคนที่ไม่รู้จัก) กดแล้วเปิดรูปเต็มในแท็บใหม่
+      const tdFace = document.createElement('td');
+      if (log.face_url) {
+        const link = document.createElement('a');
+        link.href = log.face_url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.title = 'เปิดรูปใบหน้า';
+        const img = document.createElement('img');
+        img.className = 'access-face';
+        img.src = log.face_url;
+        img.alt = 'ใบหน้าที่ตรวจเจอ ลำดับที่ ' + log.id;
+        img.loading = 'lazy';
+        link.appendChild(img);
+        tdFace.appendChild(link);
+      } else {
+        tdFace.textContent = '—';
+        tdFace.className = 'access-face--none';
+      }
+
       const tdName = document.createElement('td');
-      tdName.textContent = log.first_name + ' ' + log.last_name + ' (' + log.student_id + ')';
+      let displayName;
+      if (log.is_unknown) {
+        displayName = 'Unknown';
+        const unknownBadge = document.createElement('span');
+        unknownBadge.className = 'badge badge--unknown';
+        unknownBadge.textContent = 'Unknown (ไม่รู้จัก)';
+        tdName.appendChild(unknownBadge);
+      } else {
+        displayName = log.first_name + ' ' + log.last_name;
+        tdName.textContent = displayName + ' (' + log.student_id + ')';
+      }
 
       const tdTime = document.createElement('td');
       tdTime.textContent = new Date(log.logged_at).toLocaleString('th-TH', {
@@ -1122,12 +1153,12 @@ async function loadAccessLogs() {
       btnDel.className = 'btn btn--danger btn--small';
       btnDel.textContent = 'ลบ';
       btnDel.addEventListener('click', function () {
-        deleteAccessLogs(log.id, 'ลบประวัติลำดับที่ ' + log.id + ' (' + log.first_name + ' ' +
-          log.last_name + ') ใช่ไหม?\nลบแล้วกู้คืนไม่ได้');
+        deleteAccessLogs(log.id, 'ลบประวัติลำดับที่ ' + log.id + ' (' + displayName +
+          ') ใช่ไหม?\nลบแล้วกู้คืนไม่ได้');
       });
       tdDel.appendChild(btnDel);
 
-      tr.append(tdNo, tdName, tdTime, tdDir, tdCam, tdDel);
+      tr.append(tdNo, tdFace, tdName, tdTime, tdDir, tdCam, tdDel);
       el.accessTbody.appendChild(tr);
     });
   } catch (err) {

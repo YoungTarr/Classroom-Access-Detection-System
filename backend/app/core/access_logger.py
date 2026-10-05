@@ -20,6 +20,15 @@
 สองชั้น: (1) CameraRunner บันทึกครั้งเดียวต่อ track  (2) คลาสนี้เว้นช่วง cooldown
 สำหรับ "คนเดิม + ทิศทางเดิม" เผื่อ track ขาดแล้วสร้างใหม่ตอนยืนหน้ากล้องนาน ๆ
 คนเดิมแต่ทิศทางต่างกัน (เข้าแล้วออก) ไม่ถูกกันไว้ เพราะเป็นเหตุการณ์จริงคนละอย่าง
+
+============================================================================
+คนที่ไม่รู้จัก (Unknown) - เฟส 13
+============================================================================
+
+บันทึกด้วยเหมือนกัน แต่ไม่มีรหัส/ชื่อ (เป็น NULL) และเก็บรูปใบหน้าที่ครอปไว้แทน
+เพื่อให้กลับมาดูได้ว่าคนแปลกหน้าคนนั้นหน้าตาเป็นอย่างไร
+คนแปลกหน้าแยกกันไม่ได้ cooldown จึงนับต่อ "กล้อง + ทิศทาง" แทนรหัสนักศึกษา
+งานเข้ารหัสรูปเป็น JPEG ทำใน thread นี้ ไม่ได้ทำในลูปตรวจจับ
 """
 
 from __future__ import annotations
@@ -28,9 +37,11 @@ import logging
 import queue
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
+
+import numpy as np
 
 from app.config import settings
 from app.db.database import Database
@@ -41,14 +52,54 @@ logger = logging.getLogger(__name__)
 MAX_ATTEMPTS = 3
 RETRY_DELAY = 1.0
 
+# รูปใบหน้าที่เก็บ: ขยายกรอบออกไปรอบด้านอีกเท่านี้ (ให้เห็นทรงผม/คาง ดูออกง่ายขึ้น)
+# แล้วย่อให้ด้านยาวไม่เกิน FACE_MAX_SIDE พิกเซล รูปละไม่กี่สิบ KB จึงเก็บในฐานข้อมูลได้สบาย
+FACE_PADDING = 0.25
+FACE_MAX_SIDE = 240
+FACE_JPEG_QUALITY = 85
+
+
+def crop_face(image: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray | None:
+    """ครอปใบหน้าจากเฟรม (ขยายขอบเล็กน้อย) คืนสำเนา หรือ None ถ้ากรอบอยู่นอกภาพ
+
+    ต้องคืน "สำเนา" เพราะเฟรมต้นฉบับอาจถูกใช้ต่อ/เขียนทับ ก่อนที่ thread บันทึกจะได้เข้ารหัส
+    """
+    x, y, w, h = (int(v) for v in bbox)
+    pad_x, pad_y = int(w * FACE_PADDING), int(h * FACE_PADDING)
+    height, width = image.shape[:2]
+    x1, y1 = max(0, x - pad_x), max(0, y - pad_y)
+    x2, y2 = min(width, x + w + pad_x), min(height, y + h + pad_y)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return image[y1:y2, x1:x2].copy()
+
+
+def encode_face_jpeg(face: np.ndarray) -> bytes | None:
+    """ย่อรูปใบหน้าแล้วเข้ารหัสเป็น JPEG (เรียกใน thread บันทึก ไม่ใช่ลูปตรวจจับ)"""
+    import cv2
+
+    height, width = face.shape[:2]
+    scale = FACE_MAX_SIDE / max(height, width)
+    if scale < 1.0:
+        face = cv2.resize(
+            face, (max(1, int(width * scale)), max(1, int(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    ok, buffer = cv2.imencode(".jpg", face, [cv2.IMWRITE_JPEG_QUALITY, FACE_JPEG_QUALITY])
+    return buffer.tobytes() if ok else None
+
 
 @dataclass(frozen=True)
 class AccessEvent:
-    """เหตุการณ์ที่ต้องบันทึกหนึ่งรายการ"""
+    """เหตุการณ์ที่ต้องบันทึกหนึ่งรายการ
 
-    student_id: str
-    first_name: str
-    last_name: str
+    สมาชิกที่จดจำได้: มี student_id / ชื่อ / นามสกุล
+    คนที่ไม่รู้จัก:   is_unknown=True ทั้งสามช่องเป็น None และมีรูปใบหน้า (face_image)
+    """
+
+    student_id: str | None
+    first_name: str | None
+    last_name: str | None
     direction: str  # "IN" หรือ "OUT"
     camera_id: str
     camera_name: str
@@ -57,10 +108,22 @@ class AccessEvent:
     frame_size: tuple[int, int]  # กว้าง, สูง
     confidence: float | None
     track_id: int | None
+    is_unknown: bool = False
+    face_image: np.ndarray | None = None  # ใบหน้าที่ครอปแล้ว (BGR) ยังไม่เข้ารหัส
+
+    @property
+    def display_name(self) -> str:
+        if self.is_unknown:
+            return "Unknown"
+        return f"{self.student_id} {self.first_name} {self.last_name}"
 
     def as_row(self) -> dict[str, Any]:
+        """แปลงเป็นแถวของตาราง (เข้ารหัสรูปใบหน้าตรงนี้ จึงต้องเรียกใน thread บันทึก)"""
         x, y, w, h = self.bbox
+        face_jpeg = encode_face_jpeg(self.face_image) if self.face_image is not None else None
         return {
+            "is_unknown": self.is_unknown,
+            "face_jpeg": face_jpeg,
             "student_id": self.student_id,
             "first_name": self.first_name,
             "last_name": self.last_name,
@@ -87,12 +150,14 @@ class AccessLogger:
         self._database = database
         self._enabled = cfg.enabled
         self._cooldown = cfg.cooldown_seconds
+        self._unknown_cooldown = cfg.unknown_cooldown_seconds
 
         self._queue: queue.Queue[AccessEvent] = queue.Queue(maxsize=cfg.queue_size)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
         # เวลา (monotonic) ที่บันทึกล่าสุดของ (student_id, direction)
+        # หรือ ("unknown@<camera_id>", direction) สำหรับคนที่ไม่รู้จัก
         # เข้าถึงจาก event loop thread (submit) เท่านั้น จึงไม่ต้องล็อก
         self._last_logged: dict[tuple[str, str], float] = {}
 
@@ -150,10 +215,15 @@ class AccessLogger:
         if not self._enabled or self._thread is None:
             return False
 
-        key = (event.student_id, event.direction)
+        if event.is_unknown:
+            key = (f"unknown@{event.camera_id}", event.direction)
+            cooldown = self._unknown_cooldown
+        else:
+            key = (event.student_id or "", event.direction)
+            cooldown = self._cooldown
         now = time.monotonic()
         last = self._last_logged.get(key)
-        if last is not None and now - last < self._cooldown:
+        if last is not None and now - last < cooldown:
             with self._stats_lock:
                 self._skipped_cooldown += 1
             return False
@@ -165,7 +235,7 @@ class AccessLogger:
                 self._dropped_queue_full += 1
                 self._last_error = "คิวบันทึกประวัติเต็ม (ฐานข้อมูลช้าหรือล่ม) ทิ้งรายการใหม่"
             logger.error(
-                "คิวบันทึกประวัติเต็ม ทิ้งรายการของ %s (%s)", event.student_id, event.direction
+                "คิวบันทึกประวัติเต็ม ทิ้งรายการของ %s (%s)", event.display_name, event.direction
             )
             return False
 
@@ -187,10 +257,18 @@ class AccessLogger:
             self._write(event)
 
     def _write(self, event: AccessEvent) -> None:
+        # เข้ารหัสรูปครั้งเดียวก่อนเข้าลูปลองซ้ำ (ลองซ้ำแค่ส่วนที่คุยกับฐานข้อมูล)
+        try:
+            row = event.as_row()
+        except Exception as exc:  # noqa: BLE001
+            # เข้ารหัสรูปไม่ได้ไม่ใช่เหตุให้ทิ้งทั้งรายการ บันทึกต่อโดยไม่มีรูป
+            logger.warning("เข้ารหัสรูปใบหน้าไม่สำเร็จ บันทึกโดยไม่มีรูป: %s", exc)
+            row = replace(event, face_image=None).as_row()
+
         last_exc: Exception | None = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                log_id = self._database.insert_access_log(event.as_row())
+                log_id = self._database.insert_access_log(row)
             except Exception as exc:  # noqa: BLE001 - ต้องไม่ให้ thread ตาย
                 last_exc = exc
                 logger.warning(
@@ -204,15 +282,20 @@ class AccessLogger:
                     self._written += 1
                     self._last_written = {
                         "id": log_id,
+                        "is_unknown": event.is_unknown,
                         "student_id": event.student_id,
-                        "name": f"{event.first_name} {event.last_name}",
+                        "name": (
+                            "Unknown" if event.is_unknown
+                            else f"{event.first_name} {event.last_name}"
+                        ),
                         "direction": event.direction,
                         "camera_id": event.camera_id,
                     }
                 logger.info(
-                    "บันทึกประวัติ #%d: %s %s %s (%s) กล้อง %s",
-                    log_id, event.student_id, event.first_name, event.last_name,
+                    "บันทึกประวัติ #%d: %s (%s) กล้อง %s%s",
+                    log_id, event.display_name,
                     "เข้า" if event.direction == "IN" else "ออก", event.camera_id,
+                    " + รูปใบหน้า" if row.get("face_jpeg") else "",
                 )
                 return
 
@@ -221,7 +304,7 @@ class AccessLogger:
             self._last_error = f"เขียนฐานข้อมูลไม่สำเร็จ: {last_exc}"
         logger.error(
             "ทิ้งรายการของ %s (%s) หลังลอง %d ครั้งแล้วยังเขียนไม่ได้",
-            event.student_id, event.direction, MAX_ATTEMPTS,
+            event.display_name, event.direction, MAX_ATTEMPTS,
         )
 
     # ------------------------------------------------------------------
@@ -233,6 +316,7 @@ class AccessLogger:
                 "enabled": self._enabled,
                 "running": self._thread is not None and self._thread.is_alive(),
                 "cooldown_seconds": self._cooldown,
+                "unknown_cooldown_seconds": self._unknown_cooldown,
                 "queued": self._queue.qsize(),
                 "written": self._written,
                 "skipped_cooldown": self._skipped_cooldown,

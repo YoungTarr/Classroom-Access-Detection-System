@@ -64,10 +64,13 @@ CREATE TRIGGER trg_members_updated_at
 -- -----------------------------------------------------------------------------
 -- ตาราง access_logs : ประวัติการเข้า-ออกห้อง (เฟส 12)
 --
--- หนึ่งแถว = หนึ่งครั้งที่ระบบจดจำใบหน้าสมาชิกได้ที่กล้องประตู
+-- หนึ่งแถว = หนึ่งครั้งที่ระบบตรวจเจอคนที่กล้องประตู
 --   กล้องที่ตั้งทิศทาง IN  -> บันทึก direction = 'IN'  (เข้า)
 --   กล้องที่ตั้งทิศทาง OUT -> บันทึก direction = 'OUT' (ออก)
 -- ทิศทางมาจากการตั้งค่ากล้อง (CAMERA_n_DIRECTION) ไม่ได้มาจากการเดินซ้าย/ขวาในภาพ
+--
+-- เฟส 13: คนที่ไม่รู้จักก็บันทึกด้วย (is_unknown = true) รหัส/ชื่อเป็น NULL
+-- และเก็บรูปใบหน้าที่ครอปไว้ใน face_jpeg แทน
 --
 -- เก็บชื่อ-นามสกุลซ้ำไว้ในแถว (snapshot) โดยตั้งใจ และไม่ทำ foreign key ไป members
 -- เพื่อให้ประวัติยังถูกต้องแม้ภายหลังมีการแก้ชื่อหรือลบสมาชิกออก
@@ -78,9 +81,10 @@ CREATE TRIGGER trg_members_updated_at
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS access_logs (
     id           BIGSERIAL    PRIMARY KEY,
-    student_id   VARCHAR(20)  NOT NULL,
-    first_name   VARCHAR(100) NOT NULL,
-    last_name    VARCHAR(100) NOT NULL,
+    is_unknown   BOOLEAN      NOT NULL DEFAULT false,
+    student_id   VARCHAR(20),
+    first_name   VARCHAR(100),
+    last_name    VARCHAR(100),
     logged_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
     direction    VARCHAR(3)   NOT NULL CHECK (direction IN ('IN', 'OUT')),
     camera_id    VARCHAR(20)  NOT NULL,
@@ -92,7 +96,10 @@ CREATE TABLE IF NOT EXISTS access_logs (
     frame_width  INTEGER      NOT NULL,
     frame_height INTEGER      NOT NULL,
     confidence   REAL,
-    track_id     INTEGER
+    track_id     INTEGER,
+    face_jpeg    BYTEA,
+    -- สมาชิกที่จดจำได้ต้องมีรหัสเสมอ มีแค่คนที่ไม่รู้จักที่ปล่อยว่างได้
+    CONSTRAINT access_logs_identity_check CHECK (is_unknown OR student_id IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_logs_logged_at ON access_logs (logged_at DESC);
@@ -100,9 +107,11 @@ CREATE INDEX IF NOT EXISTS idx_access_logs_student   ON access_logs (student_id,
 
 COMMENT ON TABLE  access_logs              IS 'ประวัติการเข้า-ออกห้องที่ระบบบันทึกอัตโนมัติจากการจดจำใบหน้า';
 COMMENT ON COLUMN access_logs.id           IS 'ลำดับของรายการ (running number)';
-COMMENT ON COLUMN access_logs.student_id   IS 'รหัสนักศึกษาของคนที่จดจำได้';
-COMMENT ON COLUMN access_logs.first_name   IS 'ชื่อ ณ เวลาที่บันทึก (snapshot)';
-COMMENT ON COLUMN access_logs.last_name    IS 'นามสกุล ณ เวลาที่บันทึก (snapshot)';
+COMMENT ON COLUMN access_logs.is_unknown   IS 'true = คนที่ไม่รู้จัก (ไม่ใช่สมาชิก) รหัส/ชื่อจะเป็น NULL';
+COMMENT ON COLUMN access_logs.student_id   IS 'รหัสนักศึกษาของคนที่จดจำได้ (NULL ถ้าไม่รู้จัก)';
+COMMENT ON COLUMN access_logs.first_name   IS 'ชื่อ ณ เวลาที่บันทึก (snapshot, NULL ถ้าไม่รู้จัก)';
+COMMENT ON COLUMN access_logs.last_name    IS 'นามสกุล ณ เวลาที่บันทึก (snapshot, NULL ถ้าไม่รู้จัก)';
+COMMENT ON COLUMN access_logs.face_jpeg    IS 'รูปใบหน้าที่ครอปจากกล้อง (JPEG) เก็บเฉพาะคนที่ไม่รู้จัก';
 COMMENT ON COLUMN access_logs.logged_at    IS 'วันเวลาที่ระบบจดจำได้ (เวลาที่ตรวจเจอ ไม่ใช่เวลาที่เขียนลงฐานข้อมูล)';
 COMMENT ON COLUMN access_logs.direction    IS 'IN = เข้าห้อง (กล้องขาเข้า), OUT = ออกจากห้อง (กล้องขาออก)';
 COMMENT ON COLUMN access_logs.camera_id    IS 'รหัสกล้องที่จับภาพได้ (CAMERA_IDS ใน .env)';

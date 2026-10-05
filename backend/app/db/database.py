@@ -155,6 +155,23 @@ class Database:
         );
         CREATE INDEX IF NOT EXISTS idx_access_logs_logged_at ON access_logs (logged_at DESC);
         CREATE INDEX IF NOT EXISTS idx_access_logs_student   ON access_logs (student_id, logged_at DESC);
+
+        -- เฟส 13: บันทึกคนที่ไม่รู้จักด้วย (ไม่มีรหัส/ชื่อ แต่มีรูปใบหน้า)
+        -- ทุกคำสั่งรันซ้ำได้ จึงใช้อัปเกรดตารางของเฟส 12 ที่มีข้อมูลอยู่แล้วได้เลย
+        ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS is_unknown BOOLEAN NOT NULL DEFAULT false;
+        ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS face_jpeg  BYTEA;
+        ALTER TABLE access_logs ALTER COLUMN student_id DROP NOT NULL;
+        ALTER TABLE access_logs ALTER COLUMN first_name DROP NOT NULL;
+        ALTER TABLE access_logs ALTER COLUMN last_name  DROP NOT NULL;
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'access_logs_identity_check'
+            ) THEN
+                ALTER TABLE access_logs ADD CONSTRAINT access_logs_identity_check
+                    CHECK (is_unknown OR student_id IS NOT NULL);
+            END IF;
+        END $$;
     """
 
     def ensure_access_logs_table(self) -> None:
@@ -169,11 +186,13 @@ class Database:
                 cur.execute(
                     """
                     INSERT INTO access_logs
-                        (student_id, first_name, last_name, logged_at, direction,
+                        (is_unknown, face_jpeg,
+                         student_id, first_name, last_name, logged_at, direction,
                          camera_id, camera_name, bbox_x, bbox_y, bbox_w, bbox_h,
                          frame_width, frame_height, confidence, track_id)
                     VALUES
-                        (%(student_id)s, %(first_name)s, %(last_name)s, %(logged_at)s,
+                        (%(is_unknown)s, %(face_jpeg)s,
+                         %(student_id)s, %(first_name)s, %(last_name)s, %(logged_at)s,
                          %(direction)s, %(camera_id)s, %(camera_name)s,
                          %(bbox_x)s, %(bbox_y)s, %(bbox_w)s, %(bbox_h)s,
                          %(frame_width)s, %(frame_height)s, %(confidence)s, %(track_id)s)
@@ -218,13 +237,20 @@ class Database:
         limit: int = 50,
         direction: str | None = None,
         student_id: str | None = None,
+        unknown: bool | None = None,
     ) -> list[dict[str, Any]]:
-        """ดึงประวัติล่าสุดก่อน (กรองตามทิศทาง/รหัสนักศึกษาได้)"""
+        """ดึงประวัติล่าสุดก่อน (กรองตามทิศทาง/รหัสนักศึกษา/เฉพาะคนที่ไม่รู้จักได้)
+
+        ไม่ดึงตัวรูปใบหน้ามาด้วย (หนัก) ส่งแค่ has_face ไว้บอกว่ามีรูปให้เปิดดูไหม
+        """
         conditions: list[str] = []
         params: dict[str, Any] = {"limit": limit}
         if direction:
             conditions.append("direction = %(direction)s")
             params["direction"] = direction
+        if unknown is not None:
+            conditions.append("is_unknown = %(unknown)s")
+            params["unknown"] = unknown
         if student_id:
             conditions.append("student_id = %(student_id)s")
             params["student_id"] = student_id
@@ -234,7 +260,8 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT id, student_id, first_name, last_name, logged_at, direction,
+                    SELECT id, is_unknown, face_jpeg IS NOT NULL AS has_face,
+                           student_id, first_name, last_name, logged_at, direction,
                            camera_id, camera_name, bbox_x, bbox_y, bbox_w, bbox_h,
                            frame_width, frame_height, confidence, track_id
                       FROM access_logs
@@ -245,6 +272,16 @@ class Database:
                     params,
                 )
                 return cur.fetchall()
+
+    def fetch_access_log_face(self, log_id: int) -> bytes | None:
+        """รูปใบหน้า (JPEG) ของประวัติรายการหนึ่ง หรือ None ถ้าไม่มีรายการ/ไม่มีรูป"""
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT face_jpeg FROM access_logs WHERE id = %s", (log_id,))
+                row = cur.fetchone()
+                if row is None or row["face_jpeg"] is None:
+                    return None
+                return bytes(row["face_jpeg"])
 
 
 # instance เดียวใช้ร่วมกันทั้งแอป สร้าง/ปิดใน lifespan ของ FastAPI

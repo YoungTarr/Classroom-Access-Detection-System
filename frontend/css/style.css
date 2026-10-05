@@ -782,6 +782,31 @@ body:not(.show-debug) .debug-only {
   background: rgba(255, 92, 92, 0.25);
 }
 
+/* คนที่ไม่รู้จักในตารางประวัติ (เฟส 13) - สีแดงให้ตรงกับกรอบ Unknown บนภาพกล้อง */
+.badge--unknown {
+  background: rgba(255, 92, 92, 0.15);
+  color: #ff9a9a;
+  font-weight: 600;
+}
+
+.access-row--unknown {
+  box-shadow: inset 3px 0 0 var(--error);
+}
+
+.access-face {
+  display: block;
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+}
+
+.access-face--none {
+  color: var(--text-dim);
+}
+
 .btn--small {
   padding: 3px 10px;
   font-size: 13px;

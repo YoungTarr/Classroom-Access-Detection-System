@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
-from app.core.access_logger import AccessEvent, AccessLogger
+from app.core.access_logger import AccessEvent, AccessLogger, crop_face
 from app.core.detect_scheduler import DetectScheduler
 from app.core.frame_source import FrameSource
 from app.core.pipeline import Pipeline
@@ -63,6 +63,9 @@ from app.core.tracker import tracks_to_dicts
 from app.identify.base import Identifier
 
 logger = logging.getLogger(__name__)
+
+# ใช้แทน student_id ในเซ็ต _logged_keys สำหรับคนที่ไม่รู้จัก (รหัสนักศึกษาจริงไม่มีวันเป็นค่านี้)
+UNKNOWN_KEY = "__unknown__"
 
 # หัวข้อความ: ความยาวของส่วน JSON เป็น uint32 little-endian
 STREAM_HEADER_FORMAT = "<I"
@@ -148,6 +151,7 @@ class CameraRunner:
         # ตัวบันทึกประวัติเข้า-ออก (ใช้ร่วมกันทุกกล้อง) กับ track ที่บันทึกไปแล้วของกล้องนี้
         # เก็บเป็น (track_id, student_id) เพื่อให้ track เดียวบันทึกได้ครั้งเดียวต่อคน
         # แต่ถ้าผลโหวตเปลี่ยนไปเป็นอีกคน (แก้ที่เคยจำผิด) ก็บันทึกคนใหม่ได้
+        # คนที่ไม่รู้จักใช้ (track_id, UNKNOWN_KEY)
         self.access_logger = access_logger
         self._logged_keys: set[tuple[int, str]] = set()
 
@@ -291,7 +295,7 @@ class CameraRunner:
                     )
                     self._frames_since_detection = 0
                     self.detect_meter.tick()
-                    self._record_access(result)
+                    self._record_access(result, frame.image)
 
                     self._last_detect_ms = result.detect_ms
                     self._last_identify_ms = result.identify_ms
@@ -310,12 +314,14 @@ class CameraRunner:
             elapsed = time.monotonic() - started
             await asyncio.sleep(max(0.0, interval - elapsed))
 
-    def _record_access(self, result) -> None:
-        """บันทึกประวัติเข้า-ออกสำหรับคนที่ "จดจำได้แล้ว" ในผลตรวจรอบนี้
+    def _record_access(self, result, image) -> None:
+        """บันทึกประวัติเข้า-ออกของคนในผลตรวจรอบนี้ (ทั้งสมาชิกและคนที่ไม่รู้จัก)
 
         นับว่า "ผ่าน" เมื่อผลโหวตของ track ตัดสินแล้วว่าเป็นสมาชิกคนหนึ่ง
         (decided_identity) ไม่ใช่ผลของเฟรมเดียว จึงไม่บันทึกมั่วจากการจำพลาดชั่วคราว
         ทิศทางคือทิศทางของกล้องตัวนี้: IN = เข้า, OUT = ออก
+
+        คนที่ไม่รู้จัก (เฟส 13) ดูที่ _is_confirmed_unknown และครอปรูปใบหน้าจาก image เก็บไว้ด้วย
 
         ห้ามโยน exception ออกไป ไม่งั้นจะลากลูปตรวจจับของกล้องให้ล้มด้วย
         """
@@ -326,8 +332,15 @@ class CameraRunner:
             live_ids = set()
             for track in result.tracks:
                 live_ids.add(track.track_id)
+                if not track.is_visible:
+                    continue
+
+                if self._is_confirmed_unknown(track):
+                    self._record_unknown(track, result, image)
+                    continue
+
                 identity = track.decided_identity
-                if identity is None or not identity.is_recognized or not track.is_visible:
+                if identity is None or not identity.is_recognized:
                     continue
 
                 key = (track.track_id, identity.student_id)
@@ -353,6 +366,47 @@ class CameraRunner:
             self._logged_keys = {k for k in self._logged_keys if k[0] in live_ids}
         except Exception:  # noqa: BLE001
             logger.exception("บันทึกประวัติเข้า-ออกของกล้อง %s ผิดพลาด", self.camera_id)
+
+    @staticmethod
+    def _is_confirmed_unknown(track) -> bool:
+        """track นี้ "แน่ใจแล้ว" ว่าเป็นคนที่ไม่รู้จักหรือยัง
+
+        เข้มกว่า identity_state == "unknown" โดยตั้งใจ: ต้องตรวจครบทั้งหน้าต่างโหวต
+        (IDENTITY_VOTE_WINDOW) และ "ไม่มีสักครั้ง" ที่ตรงกับสมาชิก
+        เพราะสมาชิกที่เพิ่งเดินเข้าเฟรมอาจโดนตัดสินเป็น Unknown ชั่วคราว
+        ระหว่างรอเสียงโหวตให้ถึง IDENTITY_MIN_VOTES ถ้าบันทึกตอนนั้นจะได้ Unknown ปลอม
+        """
+        votes = track.identity_votes
+        return (
+            len(votes) >= settings.identify.vote_window
+            and all(vote is None for vote in votes)
+        )
+
+    def _record_unknown(self, track, result, image) -> None:
+        """บันทึกคนที่ไม่รู้จักพร้อมรูปใบหน้า (ครั้งเดียวต่อ track)"""
+        key = (track.track_id, UNKNOWN_KEY)
+        if key in self._logged_keys:
+            return
+        self._logged_keys.add(key)
+
+        bbox = tuple(track.bbox)
+        identity = track.decided_identity
+        self.access_logger.submit(AccessEvent(
+            student_id=None,
+            first_name=None,
+            last_name=None,
+            direction=self.camera.direction,
+            camera_id=self.camera_id,
+            camera_name=self.camera.name,
+            logged_at=datetime.now(timezone.utc),
+            bbox=bbox,
+            frame_size=result.source_size,
+            # คะแนนของคนในระบบที่ใกล้เคียงที่สุด (ต่ำกว่าเกณฑ์) ไว้ดูว่าเฉียดแค่ไหน
+            confidence=identity.confidence if identity is not None else None,
+            track_id=track.track_id,
+            is_unknown=True,
+            face_image=crop_face(image, bbox),
+        ))
 
     # ------------------------------------------------------------------
     # ลูปส่งภาพ (เร็ว)

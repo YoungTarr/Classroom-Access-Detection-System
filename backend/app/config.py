@@ -538,6 +538,11 @@ class AccessLogSettings:
     # กันกรณียืนหน้ากล้องนาน ๆ แล้ว track ขาดแล้วสร้างใหม่ จนบันทึกรัว
     cooldown_seconds: float
 
+    # คนที่ไม่รู้จัก (Unknown) แยกคนไม่ได้ จึงเว้นช่วงต่อ "กล้อง + ทิศทาง" แทน (เฟส 13)
+    # กัน track ของคนแปลกหน้าที่ยืนนิ่ง ๆ ขาดแล้วสร้างใหม่จนบันทึกรัว
+    # ตั้งสั้นกว่าของสมาชิกโดยตั้งใจ เพราะคนแปลกหน้าสองคนที่เดินตามกันมาจะถูกกันไว้ด้วย
+    unknown_cooldown_seconds: float
+
     # ขนาดคิวรอเขียนฐานข้อมูล เต็มแล้วจะทิ้งรายการใหม่พร้อมนับไว้ใน /api/health
     # (ไม่ปล่อยให้คิวโตไม่จำกัดจนกินแรม ถ้าฐานข้อมูลล่มนาน)
     queue_size: int
@@ -792,6 +797,7 @@ def load_settings() -> Settings:
         access_log=AccessLogSettings(
             enabled=_get_bool("ACCESS_LOG_ENABLED", True),
             cooldown_seconds=_get_float("ACCESS_LOG_COOLDOWN_SECONDS", 30.0),
+            unknown_cooldown_seconds=_get_float("ACCESS_LOG_UNKNOWN_COOLDOWN_SECONDS", 10.0),
             queue_size=_get_int("ACCESS_LOG_QUEUE_SIZE", 200),
         ),
         rates=RateSettings(
