@@ -1,7 +1,7 @@
 /* =============================================================================
    Classroom Access Detection System - สคริปต์หน้าเว็บหลัก
 
-   เฟส 1: สถานะการเชื่อมต่อฐานข้อมูล + ตารางรายชื่อสมาชิก
+   เฟส 1: สถานะการเชื่อมต่อฐานข้อมูล (ไม่แสดงรายชื่อสมาชิกบนหน้าเว็บ เพื่อความเป็นส่วนตัว)
    เฟส 2: เปิดเว็บแคม ส่งเฟรมไปตรวจจับใบหน้า แล้ววาดกรอบทับภาพ
    เฟส 3-5: กรอบไหลลื่น + จดจำว่าเป็นใคร + ทิศทางการเคลื่อนที่
    เฟส 6-7: รับภาพจากกล้อง IP + แยกอัตรา fps สามค่า
@@ -20,7 +20,7 @@
        camera.js        CameraController  เปิดเว็บแคม + จับภาพเป็น JPEG
                                           (ใช้เฉพาะโหมดเว็บแคมเดี่ยว)
 
-   ไฟล์นี้จึงเหลือแค่: โหลด config -> เลือกโหมด -> สร้างจอ -> สถานะระบบ -> รายชื่อ
+   ไฟล์นี้จึงเหลือแค่: โหลด config -> เลือกโหมด -> สร้างจอ -> สถานะระบบ -> ประวัติเข้า-ออก
 
    ============================================================================
    สองโหมดที่ต่างกันโดยสิ้นเชิง
@@ -50,7 +50,6 @@
 // ---------------------------------------------------------------------------
 const API = {
   health: '/api/health',
-  members: '/api/members',
   config: '/api/config',
   cameras: '/api/cameras',
   accessLogs: '/api/access-logs?limit=30',
@@ -131,9 +130,7 @@ const el = {
   serverTime: byId('health-server-time'),
   healthError: byId('health-error'),
 
-  // ---- สมาชิก ----
-  memberCount: byId('member-count'),
-  memberTbody: byId('member-tbody'),
+  // ---- ประวัติเข้า-ออก ----
   accessTbody: byId('access-tbody'),
   accessCount: byId('access-count'),
   btnDeleteAllLogs: byId('btn-delete-all-logs'),
@@ -821,7 +818,7 @@ async function applySourceMode() {
 }
 
 // ===========================================================================
-// ส่วนที่ 5: สถานะระบบ + รายชื่อสมาชิก (เฟส 1)
+// ส่วนที่ 5: สถานะระบบ (เฟส 1)
 // ===========================================================================
 async function loadHealth() {
   try {
@@ -984,87 +981,6 @@ function renderCameraHealth(cameras) {
   });
 }
 
-/** แถวข้อความกลางตาราง ใช้ตอนกำลังโหลด / ไม่มีข้อมูล / เกิดข้อผิดพลาด */
-function renderTableMessage(message) {
-  el.memberTbody.replaceChildren();
-  const tr = document.createElement('tr');
-  const td = document.createElement('td');
-  td.colSpan = 4;
-  td.className = 'table__empty';
-  td.textContent = message;
-  tr.appendChild(td);
-  el.memberTbody.appendChild(tr);
-}
-
-/** จุดสามจุดบอกว่ามีรูปซ้าย/หน้า/ขวาในฐานข้อมูลครบหรือไม่ จุดที่มีรูปกดเปิดดูรูปได้ */
-function buildPhotoDots(photos) {
-  const wrap = document.createElement('span');
-  wrap.className = 'photo-dots';
-
-  const angles = [['left', 'ซ้าย'], ['front', 'หน้า'], ['right', 'ขวา']];
-  angles.forEach(function (pair) {
-    const key = pair[0];
-    const label = pair[1];
-    const url = photos && photos[key];
-    const dot = document.createElement(url ? 'a' : 'span');
-    dot.className = 'photo-dot' + (url ? ' photo-dot--set' : '');
-    dot.title = label + ': ' + (url ? 'กดเพื่อดูรูป' : 'ยังไม่มีรูป');
-    if (url) {
-      dot.href = url;
-      dot.target = '_blank';
-      dot.rel = 'noopener';
-    }
-    wrap.appendChild(dot);
-  });
-
-  return wrap;
-}
-
-async function loadMembers() {
-  try {
-    const res = await fetch(API.members, { cache: 'no-store' });
-
-    if (!res.ok) {
-      // ไม่กลืน error เงียบ ๆ ต้องบอกว่าเป็น HTTP อะไร
-      throw new Error('HTTP ' + res.status + ' ' + res.statusText);
-    }
-
-    const data = await res.json();
-    const members = data.members || [];
-
-    setText(el.memberCount, members.length + ' คน');
-
-    if (members.length === 0) {
-      renderTableMessage('ยังไม่มีข้อมูลสมาชิก (ตรวจสอบว่า db/seed.sql ถูกรันแล้วหรือยัง)');
-      return;
-    }
-
-    el.memberTbody.replaceChildren();
-    members.forEach(function (m) {
-      const tr = document.createElement('tr');
-
-      const tdId = document.createElement('td');
-      tdId.textContent = m.student_id;
-
-      const tdFirst = document.createElement('td');
-      tdFirst.textContent = m.first_name;
-
-      const tdLast = document.createElement('td');
-      tdLast.textContent = m.last_name;
-
-      const tdPhotos = document.createElement('td');
-      tdPhotos.appendChild(buildPhotoDots(m.photos));
-
-      tr.append(tdId, tdFirst, tdLast, tdPhotos);
-      el.memberTbody.appendChild(tr);
-    });
-
-  } catch (err) {
-    setText(el.memberCount, 'ผิดพลาด');
-    renderTableMessage('โหลดรายชื่อไม่สำเร็จ: ' + err.message);
-  }
-}
-
 // ===========================================================================
 // ประวัติการเข้า-ออกห้อง (เฟส 12)
 // ===========================================================================
@@ -1206,12 +1122,10 @@ async function refreshAll() {
   const healthy = await loadHealth();
 
   if (healthy) {
-    await loadMembers();
     await loadAccessLogs();
   } else {
-    // ต่อฐานข้อมูลไม่ได้ ก็ไม่ต้องยิง /api/members ให้ error ซ้ำซ้อน
-    setText(el.memberCount, null);
-    renderTableMessage('รอการเชื่อมต่อฐานข้อมูล');
+    // ต่อฐานข้อมูลไม่ได้ ก็ไม่ต้องยิง /api/access-logs ให้ error ซ้ำซ้อน
+    renderAccessMessage('รอการเชื่อมต่อฐานข้อมูล');
   }
 
   el.btnRefresh.disabled = false;
