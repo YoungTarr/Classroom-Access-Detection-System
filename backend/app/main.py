@@ -380,7 +380,6 @@ def health(response: Response) -> dict[str, Any]:
         "app": {
             "name": settings.app.name,
             "version": settings.app.version,
-            "phase": 12,
         },
         "config_warnings": config_warnings,
         "database": {

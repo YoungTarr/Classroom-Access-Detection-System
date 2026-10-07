@@ -74,7 +74,6 @@ const CONFIG_FALLBACK = {
 const byId = (id) => document.getElementById(id);
 
 const el = {
-  phaseBadge: byId('phase-badge'),
 
   // ---- โหมดกล้องหลายตัว (เฟส 8) ----
   modeCameras: byId('mode-cameras'),
@@ -830,8 +829,6 @@ async function loadHealth() {
 
     el.healthDetail.hidden = false;
 
-    const phase = data.app && data.app.phase;
-    setText(el.phaseBadge, phase ? 'เฟส ' + phase : null, 'เฟส —');
     setText(el.footerVersion, data.app ? 'v' + data.app.version : null);
 
     const db = data.database || {};

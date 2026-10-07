@@ -58,15 +58,6 @@ body {
   color: var(--text-dim);
 }
 
-.topbar__phase {
-  padding: 5px 14px;
-  border: 1px solid var(--accent);
-  border-radius: 999px;
-  font-size: 13px;
-  color: var(--accent);
-  white-space: nowrap;
-}
-
 /* ---------------------------------------------------------------------------
    เลย์เอาต์หลัก
    --------------------------------------------------------------------------- */
