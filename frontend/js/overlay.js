@@ -452,37 +452,9 @@ class FaceOverlay {
       ctx.fillStyle = '#0f1420';  // ตัวอักษรสีเข้มบนพื้นสีสด อ่านง่ายกว่าสีขาว
       ctx.fillText(label, labelX + padding, labelY + 4);
 
-      // ---- ป้ายทิศทางการเคลื่อนที่ (เฟส 5) ----
-      // วางไว้ "ใต้กรอบ" เสมอ เพื่อไม่ให้ชนกับป้ายชื่อที่อยู่ด้านบน
-      // ถ้าล้นขอบล่างของภาพก็ย้ายขึ้นมาไว้ในกรอบแทน
-      if (entry.direction) {
-        const dirLabel = entry.direction.label;
-        const dirWidth = ctx.measureText(dirLabel).width + padding * 2;
-        const dirHeight = 21;
-
-        // ถ้าป้ายชื่อถูกดันลงมาอยู่ใต้กรอบแล้ว ให้ป้ายทิศทางลงมาต่อท้ายอีกชั้น
-        const nameLabelIsBelow = labelY > y;
-        let dirY = y + h + 2 + (nameLabelIsBelow ? labelHeight + 2 : 0);
-
-        // ล้นขอบล่างของภาพ ให้ย้ายขึ้นมาไว้ในกรอบแทน
-        if (dirY + dirHeight > imageBottom) {
-          dirY = Math.max(imageTop, y + h - dirHeight - 2);
-        }
-
-        let dirX = x;
-        if (dirX + dirWidth > imageRight) {
-          dirX = Math.max(imageLeft, imageRight - dirWidth);
-        }
-
-        // "อยู่กับที่" ใช้สีเทาเข้มให้ดูเงียบกว่า เพราะไม่ใช่เหตุการณ์ที่ต้องสนใจ
-        // ส่วนตอนเคลื่อนที่ใช้พื้นเข้มตัวหนังสือสว่าง ให้สะดุดตากว่า
-        const moving = entry.direction.value !== 'still';
-        ctx.fillStyle = moving ? 'rgba(15, 20, 32, 0.85)' : 'rgba(15, 20, 32, 0.55)';
-        ctx.fillRect(dirX, dirY, dirWidth, dirHeight);
-
-        ctx.fillStyle = moving ? '#ffffff' : '#93a0b8';
-        ctx.fillText(dirLabel, dirX + padding, dirY + 3);
-      }
+      // ไม่วาดป้ายทิศทางการเคลื่อนที่ (ซ้าย/ขวา/อยู่กับที่) ใต้กรอบแล้ว
+      // เพราะทิศทางเข้า-ออกที่บันทึกจริงมาจากการตั้งค่ากล้อง (IN/OUT) ไม่ได้มาจากการเดินในภาพ
+      // ป้ายนี้จึงทำให้คนดูสับสน backend ยังคำนวณและส่ง entry.direction มาเหมือนเดิม
     });
 
     ctx.globalAlpha = 1;
