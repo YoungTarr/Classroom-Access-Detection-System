@@ -756,6 +756,22 @@ body:not(.show-debug) .debug-only {
   background: rgba(255, 92, 92, 0.25);
 }
 
+/* กล่องเลื่อนของตารางประวัติ: สูงคงที่ เลื่อนดูรายการเก่าได้ หัวตารางติดอยู่ด้านบน */
+.table-wrap--scroll {
+  max-height: 70vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.table-wrap--scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-card);
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+
 /* คนที่ไม่รู้จักในตารางประวัติ (เฟส 13) - สีแดงให้ตรงกับกรอบ Unknown บนภาพกล้อง */
 .badge--unknown {
   background: rgba(255, 92, 92, 0.15);

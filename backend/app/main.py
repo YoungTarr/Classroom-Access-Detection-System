@@ -573,7 +573,7 @@ def get_member_photo(student_id: str, angle: str) -> Response:
 
 @app.get("/api/access-logs", tags=["ประวัติ"])
 def list_access_logs(
-    limit: int = Query(50, ge=1, le=500, description="จำนวนรายการสูงสุด (ใหม่สุดก่อน)"),
+    limit: int = Query(50, ge=1, le=1000, description="จำนวนรายการสูงสุด (ใหม่สุดก่อน)"),
     direction: str | None = Query(None, description="กรองเฉพาะ IN (เข้า) หรือ OUT (ออก)"),
     student_id: str | None = Query(None, description="กรองเฉพาะรหัสนักศึกษาคนหนึ่ง"),
     unknown: bool | None = Query(

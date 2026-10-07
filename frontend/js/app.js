@@ -52,7 +52,8 @@ const API = {
   health: '/api/health',
   config: '/api/config',
   cameras: '/api/cameras',
-  accessLogs: '/api/access-logs?limit=30',
+  // ดึงประวัติทั้งหมดมาแสดงในกล่องเลื่อนได้ (เพดาน 1000 รายการล่าสุด กันหน้าเว็บหนักเกินไป)
+  accessLogs: '/api/access-logs?limit=1000',  // ต้องตรงกับ ACCESS_LOG_LIMIT
 };
 
 // ตรวจสถานะซ้ำอัตโนมัติทุก 15 วินาที เพื่อให้เห็นทันทีเมื่อ backend/DB ล่มหรือกลับมา
@@ -982,6 +983,8 @@ function renderCameraHealth(cameras) {
 // ประวัติการเข้า-ออกห้อง (เฟส 12)
 // ===========================================================================
 function renderAccessMessage(message) {
+  // ข้อความแทนตาราง (กำลังโหลด / ผิดพลาด) - ล้างค่าที่จำไว้ ให้รอบถัดไปวาดตารางใหม่แน่นอน
+  lastAccessSignature = null;
   el.accessTbody.replaceChildren();
   const tr = document.createElement('tr');
   const td = document.createElement('td');
@@ -991,6 +994,9 @@ function renderAccessMessage(message) {
   tr.appendChild(td);
   el.accessTbody.appendChild(tr);
 }
+
+const ACCESS_LOG_LIMIT = 1000;
+let lastAccessSignature = null;
 
 async function loadAccessLogs() {
   try {
@@ -1002,7 +1008,13 @@ async function loadAccessLogs() {
     const data = await res.json();
     const logs = data.logs || [];
 
-    setText(el.accessCount, 'ล่าสุด ' + logs.length + ' รายการ');
+    setText(el.accessCount, (logs.length >= ACCESS_LOG_LIMIT ? 'ล่าสุด ' : 'ทั้งหมด ') + logs.length + ' รายการ');
+
+    // วาดตารางใหม่เฉพาะตอนข้อมูลเปลี่ยน (ดึงทุก 5 วินาที) ไม่งั้นกล่องเลื่อนจะกระตุก
+    // และรูปหน้าหลายร้อยรูปถูกสร้างใหม่ทุกรอบโดยไม่จำเป็น
+    const signature = logs.map(function (log) { return log.id + '@' + log.logged_at; }).join(',');
+    if (signature === lastAccessSignature) return;
+    lastAccessSignature = signature;
 
     if (logs.length === 0) {
       renderAccessMessage('ยังไม่มีประวัติ - จะบันทึกอัตโนมัติเมื่อกล้องตรวจเจอคน (ทั้งสมาชิกและคนที่ไม่รู้จัก)');
